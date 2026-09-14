@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+from .metrics import FrameMetrics
 from .selector import Decision
 
 COLUMNS = [
@@ -13,6 +14,27 @@ COLUMNS = [
     "exposure", "filter", "date_obs", "error",
 ]
 FLOAT_COLUMNS = ("fwhm", "eccentricity", "background", "noise", "snr", "saturated_frac")
+
+
+def read_csv(path: Path, folder: Path) -> list[FrameMetrics]:
+    """讀回之前輸出的報表，讓 CLI 可以不重新量測就重套門檻。檔名會接回 folder。"""
+    frames: list[FrameMetrics] = []
+    with path.open(newline="", encoding="utf-8-sig") as fh:
+        for row in csv.DictReader(fh):
+            def f(key: str) -> float:
+                return float(row[key]) if row[key] else float("nan")
+            frames.append(FrameMetrics(
+                file=str(folder / row["file"]),
+                n_stars=int(row["n_stars"] or 0),
+                fwhm=f("fwhm"), eccentricity=f("eccentricity"),
+                background=f("background"), noise=f("noise"), snr=f("snr"),
+                saturated_frac=f("saturated_frac"),
+                exposure=float(row["exposure"]) if row["exposure"] else None,
+                filter=row["filter"] or None,
+                date_obs=row["date_obs"] or None,
+                error=row["error"] or None,
+            ))
+    return frames
 
 
 def write_csv(decisions: list[Decision], path: Path) -> None:

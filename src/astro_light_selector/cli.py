@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .metrics import FrameMetrics, measure
 from .mover import move_rejected
-from .report import print_summary, write_csv
+from .report import print_summary, read_csv, write_csv
 from .selector import Thresholds, select
 
 FITS_SUFFIXES = {".fit", ".fits", ".fts"}
@@ -32,12 +32,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="CSV 報表路徑（預設 <folder>/selection_report.csv）")
     p.add_argument("--dry-run", action="store_true", help="只分析與輸出報表，不搬檔案")
     p.add_argument("--workers", type=int, default=1, help="平行處理數（預設 1）")
+    p.add_argument("--from-report", type=Path, default=None,
+                   help="不重新量測，直接讀之前的 CSV 報表重新套門檻（調參數用）")
 
     g = p.add_argument_group("相對門檻（中位數 ± k×MAD）")
-    g.add_argument("--fwhm-k", type=float, default=3.0)
-    g.add_argument("--stars-k", type=float, default=3.0)
-    g.add_argument("--ecc-k", type=float, default=3.0)
-    g.add_argument("--background-k", type=float, default=3.0)
+    g.add_argument("-k", type=float, default=None, help="一次設定下面四個 k（越小越嚴）")
+    g.add_argument("--fwhm-k", type=float, default=None, help="預設 1.5")
+    g.add_argument("--stars-k", type=float, default=None, help="預設 2.0")
+    g.add_argument("--ecc-k", type=float, default=None, help="預設 1.5")
+    g.add_argument("--background-k", type=float, default=None, help="預設 3.0")
 
     g = p.add_argument_group("絕對門檻（設 -1 表示不使用）")
     g.add_argument("--max-fwhm", type=float, default=-1, help="FWHM 上限（像素）")
@@ -87,12 +90,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{folder} 內沒有 FITS 檔案", file=sys.stderr)
         return 1
 
-    print(f"分析 {len(files)} 張影像...")
-    frames = measure_all(files, args.workers)
+    if args.from_report:
+        frames = read_csv(args.from_report, folder)
+        print(f"從 {args.from_report} 讀入 {len(frames)} 張的量測結果")
+    else:
+        print(f"分析 {len(files)} 張影像...")
+        frames = measure_all(files, args.workers)
+
+    defaults = Thresholds()
+
+    def k_of(v: float | None, default: float) -> float:
+        if v is not None:
+            return v
+        return args.k if args.k is not None else default
 
     th = Thresholds(
-        fwhm_k=args.fwhm_k, stars_k=args.stars_k, ecc_k=args.ecc_k,
-        background_k=args.background_k,
+        fwhm_k=k_of(args.fwhm_k, defaults.fwhm_k),
+        stars_k=k_of(args.stars_k, defaults.stars_k),
+        ecc_k=k_of(args.ecc_k, defaults.ecc_k),
+        background_k=k_of(args.background_k, defaults.background_k),
         max_fwhm=_opt(args.max_fwhm),
         min_stars=None if args.min_stars < 0 else args.min_stars,
         max_eccentricity=_opt(args.max_ecc),

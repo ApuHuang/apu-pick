@@ -23,8 +23,9 @@ OSC（Bayer）影像會先做 2x2 super-pixel 再偵測，FWHM 會換算回原�
 
 兩層門檻，任何一項不合格就 reject：
 
-1. **相對門檻**：以整批影像的 中位數 ± k × MAD 為準（預設 k = 3），
-   自動適應當晚的 seeing 與天況。FWHM、離心率、背景過高，或星點數過低 → reject。
+1. **相對門檻**：以整批影像的 中位數 ± k × MAD 為準，自動適應當晚的 seeing 與天況。
+   FWHM、離心率、背景過高，或星點數過低 → reject。預設 k：FWHM 1.5、離心率 1.5、
+   星點數 2、背景 3（用實拍資料對照肉眼挑片調出來的；`-k` 可一次改四個，越小越嚴）。
 2. **絕對門檻**：硬性限制，例如星點數 < 20、離心率 > 0.7。
 
 讀取失敗或偵測不到星點的影像也會 reject。
@@ -60,7 +61,11 @@ python -m astro_light_selector D:\astro\M31\lights --workers 4 --fwhm-k 2.5 --ma
 | `--report` | `<folder>/selection_report.csv` | CSV 報表路徑 |
 | `--dry-run` | | 只分析、輸出報表，不搬檔案 |
 | `--workers N` | 1 | 平行處理數 |
-| `--fwhm-k` / `--stars-k` / `--ecc-k` / `--background-k` | 3.0 | 相對門檻的 MAD 倍數 |
+| `--from-report CSV` | | 不重新量測，讀舊報表重套門檻 |
+| `-k` | | 一次設定四個相對門檻的 k |
+| `--fwhm-k` / `--ecc-k` | 1.5 | FWHM / 離心率 的 MAD 倍數 |
+| `--stars-k` | 2.0 | 星點數 的 MAD 倍數 |
+| `--background-k` | 3.0 | 背景 的 MAD 倍數 |
 | `--max-fwhm` | 不用 | FWHM 絕對上限（像素） |
 | `--min-stars` | 20 | 星點數絕對下限 |
 | `--max-ecc` | 0.7 | 離心率絕對上限 |

@@ -17,9 +17,11 @@ class Thresholds:
     絕對門檻（max_* / min_*）為硬性限制，設為 None 表示不使用。
     """
     # 相對門檻（MAD 倍數）
-    fwhm_k: float = 3.0        # FWHM 高於 中位數 + k*MAD → reject
-    stars_k: float = 3.0       # 星點數低於 中位數 - k*MAD → reject
-    ecc_k: float = 3.0         # 離心率高於 中位數 + k*MAD → reject
+    # 預設值是用 NGC7635 實拍 296 張對照肉眼挑片調出來的：星形（FWHM / 離心率）抓嚴，
+    # 背景放寬——傍晚剛開拍背景偏亮但星點正常的張數，肉眼通常不會丟
+    fwhm_k: float = 1.5        # FWHM 高於 中位數 + k*MAD → reject
+    stars_k: float = 2.0       # 星點數低於 中位數 - k*MAD → reject
+    ecc_k: float = 1.5         # 離心率高於 中位數 + k*MAD → reject
     background_k: float = 3.0  # 背景高於 中位數 + k*MAD → reject（雲、光害、月光）
     # 絕對門檻
     max_fwhm: float | None = None
