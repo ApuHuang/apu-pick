@@ -15,10 +15,12 @@ from photutils.detection import IRAFStarFinder
 DETECT_SIGMA = 5.0
 # 偵測時假設的 FWHM（像素），只影響偵測核，不影響量測結果
 DETECT_FWHM = 4.0
-# 星點數統計最多取多少顆（避免大圖太慢）
-MAX_STARS = 2000
 # 拿最亮的幾顆做 2D Gaussian 擬合量 FWHM / 離心率
 FIT_STARS = 100
+# 擬合成功的星至少要有這麼多顆，否則視為量測失敗（例如整張被雲遮住、只剩熱像素）
+MIN_FIT_STARS = 10
+# 擬合出的 sigma 小於此值（像素）視為熱像素 / 宇宙射線，不算星
+MIN_SIGMA = 0.6
 # 擬合用的切片半寬（像素）
 CUTOUT_HALF = 10
 SIGMA_TO_FWHM = 2.3548
@@ -101,7 +103,7 @@ def _star_shape(cutout: np.ndarray, sigma0: float) -> tuple[float, float] | None
     """
     h = CUTOUT_HALF
     p0 = [float(cutout.max()), h, h, sigma0, sigma0, 0.0, 0.0]
-    lb = [0.0, h - 3, h - 3, 0.3, 0.3, -np.pi, -np.inf]
+    lb = [0.0, h - 3, h - 3, MIN_SIGMA / 2, MIN_SIGMA / 2, -np.pi, -np.inf]
     ub = [np.inf, h + 3, h + 3, h, h, np.pi, np.inf]
     try:
         res = least_squares(lambda p: (_gauss2d(p) - cutout).ravel(), p0, bounds=(lb, ub), max_nfev=200)
@@ -111,6 +113,8 @@ def _star_shape(cutout: np.ndarray, sigma0: float) -> tuple[float, float] | None
         return None
     _, _, _, sx, sy, _, _ = res.x
     big, small = max(sx, sy), min(sx, sy)
+    if small < MIN_SIGMA:
+        return None
     fwhm = SIGMA_TO_FWHM * float(np.sqrt(sx * sy))
     ecc = float(np.sqrt(1 - (small / big) ** 2))
     return fwhm, ecc
@@ -151,7 +155,6 @@ def measure(path: Path) -> FrameMetrics:
     finder = IRAFStarFinder(
         threshold=DETECT_SIGMA * bkg_std,
         fwhm=DETECT_FWHM,
-        n_brightest=MAX_STARS,
         exclude_border=True,
         peak_max=sat_level * 0.9,  # 排除飽和星
         # 放寬 roundness / sharpness 過濾：拖線的星、欠取樣的小星都要能偵測到，
@@ -164,7 +167,7 @@ def measure(path: Path) -> FrameMetrics:
     if sources is None or len(sources) == 0:
         return FrameMetrics(**base, error="偵測不到星點")
 
-    snr_med = float(np.median(sources["peak"] / bkg_std))
+    base.update(n_stars=int(len(sources)), snr=float(np.median(sources["peak"] / bkg_std)))
 
     # IRAFStarFinder 給的 fwhm 對不同 seeing 幾乎沒反應，改對最亮的幾顆做 Gaussian 擬合
     sources.sort("peak", reverse=True)
@@ -178,13 +181,11 @@ def measure(path: Path) -> FrameMetrics:
             if shape is not None:
                 fwhms.append(shape[0])
                 eccs.append(shape[1])
-    if not fwhms:
-        return FrameMetrics(**base, error="星點太靠近邊緣，無法量測形狀")
+    if len(fwhms) < MIN_FIT_STARS:
+        return FrameMetrics(**base, error=f"只有 {len(fwhms)} 顆星能擬合，可能被雲遮住或只剩熱像素")
 
     base.update(
-        n_stars=int(len(sources)),
         fwhm=float(np.median(fwhms)) * scale,
         eccentricity=float(np.median(eccs)),
-        snr=snr_med,
     )
     return FrameMetrics(**base)
