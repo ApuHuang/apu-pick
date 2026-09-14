@@ -48,7 +48,10 @@ python -m astro_light_selector D:\astro\M31\lights --dry-run
 python -m astro_light_selector D:\astro\M31\lights
 
 # 多核心平行處理、自訂門檻
-python -m astro_light_selector D:\astro\M31\lights --workers 4 --fwhm-k 2.5 --max-fwhm 5 --min-stars 50
+python -m astro_light_selector D:\astro\M31\lights --workers 4 -k 2 --max-fwhm 5 --min-stars 50
+
+# 調門檻不用重新量測：讀上次的報表重套
+python -m astro_light_selector D:\astro\M31\lights --from-report D:\astro\M31\lights\selection_report.csv -k 1.2 --dry-run
 ```
 
 也可以 `pip install -e .` 之後直接用 `astro-select <folder>` 指令。
