@@ -6,10 +6,11 @@ import csv
 from pathlib import Path
 
 from .metrics import FrameMetrics
+from .scoring import ScoreResult
 from .selector import Decision
 
 COLUMNS = [
-    "file", "keep", "reasons", "n_stars", "fwhm", "eccentricity",
+    "file", "keep", "score", "reasons", "n_stars", "fwhm", "eccentricity",
     "background", "noise", "snr", "saturated_frac",
     "exposure", "filter", "date_obs", "error",
 ]
@@ -47,6 +48,7 @@ def write_csv(decisions: list[Decision], path: Path) -> None:
             row = d.metrics.to_dict()
             row["file"] = Path(row["file"]).name
             row["keep"] = "keep" if d.keep else "reject"
+            row["score"] = "" if d.score is None else f"{d.score:.1f}"
             row["reasons"] = "; ".join(d.reasons)
             for key in FLOAT_COLUMNS:
                 v = row[key]
@@ -54,11 +56,20 @@ def write_csv(decisions: list[Decision], path: Path) -> None:
             writer.writerow(row)
 
 
+def print_score_summary(result: ScoreResult) -> None:
+    ref = result.reference
+    print(f"\n範本（各指標前段平均）: FWHM {ref['fwhm']:.2f}  ecc {ref['eccentricity']:.2f}  "
+          f"stars {ref['n_stars']:.0f}  bkg {ref['background']:.0f}")
+    print(f"分數眾數 {result.mode:.1f}，MAD {result.mad:.1f}，及格線 {result.pass_line:.0f}")
+    how = "被及格線頂住" if result.limited_by_pass_line else "由眾數決定"
+    print(f"keep 門檻 = {result.threshold:.1f}（{how}）")
+
+
 def print_summary(decisions: list[Decision]) -> None:
     kept = [d for d in decisions if d.keep]
     rejected = [d for d in decisions if not d.keep]
     print(f"\n共 {len(decisions)} 張，keep {len(kept)}，reject {len(rejected)}")
     if rejected:
-        print("\nReject 清單：")
-        for d in rejected:
+        print("\nReject 清單（分數低到高）：")
+        for d in sorted(rejected, key=lambda d: (d.score is None, d.score or 0)):
             print(f"  {Path(d.metrics.file).name}: {'; '.join(d.reasons)}")

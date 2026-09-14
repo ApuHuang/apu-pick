@@ -9,8 +9,9 @@ from pathlib import Path
 
 from .metrics import FrameMetrics, measure
 from .mover import move_rejected
-from .report import print_summary, read_csv, write_csv
-from .selector import Thresholds, select
+from .report import print_score_summary, print_summary, read_csv, write_csv
+from .scoring import ScoreConfig
+from .selector import Thresholds, select, select_by_score
 
 FITS_SUFFIXES = {".fit", ".fits", ".fts"}
 
@@ -34,15 +35,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--workers", type=int, default=1, help="平行處理數（預設 1）")
     p.add_argument("--from-report", type=Path, default=None,
                    help="不重新量測，直接讀之前的 CSV 報表重新套門檻（調參數用）")
+    p.add_argument("--mode", choices=["score", "rules"], default="score",
+                   help="score：以最佳範本評分（預設）；rules：各指標獨立門檻")
 
-    g = p.add_argument_group("相對門檻（中位數 ± k×MAD）")
+    g = p.add_argument_group("評分模式（--mode score）")
+    g.add_argument("--top-frac", type=float, default=0.10, help="每個指標取最好的前幾成當範本（預設 0.10）")
+    g.add_argument("--pass-pct", type=float, default=0.80, help="及格線 = 範本分數 × 此值（預設 0.80）")
+    g.add_argument("--margin-k", type=float, default=1.5, help="眾數往下容許幾個 MAD（預設 1.5）")
+    g.add_argument("--weights", type=str, default=None,
+                   help="權重，例如 fwhm=0.35,eccentricity=0.3,n_stars=0.2,background=0.15")
+
+    g = p.add_argument_group("規則模式（--mode rules）相對門檻（中位數 ± k×MAD）")
     g.add_argument("-k", type=float, default=None, help="一次設定下面四個 k（越小越嚴）")
     g.add_argument("--fwhm-k", type=float, default=None, help="預設 1.5")
     g.add_argument("--stars-k", type=float, default=None, help="預設 2.0")
     g.add_argument("--ecc-k", type=float, default=None, help="預設 1.5")
     g.add_argument("--background-k", type=float, default=None, help="預設 3.0")
 
-    g = p.add_argument_group("絕對門檻（設 -1 表示不使用）")
+    g = p.add_argument_group("規則模式（--mode rules）絕對門檻（設 -1 表示不使用）")
     g.add_argument("--max-fwhm", type=float, default=-1, help="FWHM 上限（像素）")
     g.add_argument("--min-stars", type=int, default=20, help="星點數下限")
     g.add_argument("--max-ecc", type=float, default=0.7, help="離心率上限")
@@ -52,6 +62,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _opt(v: float) -> float | None:
     return None if v < 0 else v
+
+
+def _parse_weights(text: str | None) -> dict[str, float] | None:
+    if not text:
+        return None
+    out: dict[str, float] = {}
+    for item in text.split(","):
+        key, _, val = item.partition("=")
+        out[key.strip()] = float(val)
+    return out
 
 
 def _progress(i: int, n: int, m: FrameMetrics) -> None:
@@ -97,24 +117,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"分析 {len(files)} 張影像...")
         frames = measure_all(files, args.workers)
 
-    defaults = Thresholds()
+    if args.mode == "score":
+        cfg = ScoreConfig(top_frac=args.top_frac, pass_pct=args.pass_pct, margin_k=args.margin_k)
+        if w := _parse_weights(args.weights):
+            cfg.weights = w
+        decisions, result = select_by_score(frames, cfg)
+        print_score_summary(result)
+    else:
+        defaults = Thresholds()
 
-    def k_of(v: float | None, default: float) -> float:
-        if v is not None:
-            return v
-        return args.k if args.k is not None else default
+        def k_of(v: float | None, default: float) -> float:
+            if v is not None:
+                return v
+            return args.k if args.k is not None else default
 
-    th = Thresholds(
-        fwhm_k=k_of(args.fwhm_k, defaults.fwhm_k),
-        stars_k=k_of(args.stars_k, defaults.stars_k),
-        ecc_k=k_of(args.ecc_k, defaults.ecc_k),
-        background_k=k_of(args.background_k, defaults.background_k),
-        max_fwhm=_opt(args.max_fwhm),
-        min_stars=None if args.min_stars < 0 else args.min_stars,
-        max_eccentricity=_opt(args.max_ecc),
-        max_saturated_frac=_opt(args.max_saturated),
-    )
-    decisions = select(frames, th)
+        th = Thresholds(
+            fwhm_k=k_of(args.fwhm_k, defaults.fwhm_k),
+            stars_k=k_of(args.stars_k, defaults.stars_k),
+            ecc_k=k_of(args.ecc_k, defaults.ecc_k),
+            background_k=k_of(args.background_k, defaults.background_k),
+            max_fwhm=_opt(args.max_fwhm),
+            min_stars=None if args.min_stars < 0 else args.min_stars,
+            max_eccentricity=_opt(args.max_ecc),
+            max_saturated_frac=_opt(args.max_saturated),
+        )
+        decisions = select(frames, th)
 
     report = args.report or folder / "selection_report.csv"
     write_csv(decisions, report)

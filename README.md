@@ -21,14 +21,18 @@ OSC（Bayer）影像會先做 2x2 super-pixel 再偵測，FWHM 會換算回原�
 
 ## 挑片邏輯
 
-兩層門檻，任何一項不合格就 reject：
+預設是**評分模式**（`--mode score`）：
 
-1. **相對門檻**：以整批影像的 中位數 ± k × MAD 為準，自動適應當晚的 seeing 與天況。
-   FWHM、離心率、背景過高，或星點數過低 → reject。預設 k：FWHM 1.5、離心率 1.5、
-   星點數 2、背景 3（用實拍資料對照肉眼挑片調出來的；`-k` 可一次改四個，越小越嚴）。
-2. **絕對門檻**：硬性限制，例如星點數 < 20、離心率 > 0.7。
+1. 讀不到、偵測不到星、能擬合的星 < 10 顆（被雲遮住）→ 直接 reject
+2. 每個指標各取整批最好的前 10% 平均，組成「最佳範本」
+3. 每張影像每個指標換算成相對範本的比例（範本 = 1，上限 1），加權後 × 100 = 分數
+   - FWHM 35%、離心率 30%、星點數 20%、背景 15%
+4. 用 KDE 找分數分布的峰值（眾數）
+5. keep 門檻 = max(眾數 − 1.5 × MAD, 100 × 80%)
+   - 平常由眾數決定；整批偏差、眾數掉到及格線以下時，由及格線頂住
 
-讀取失敗或偵測不到星點的影像也會 reject。
+也可以用 `--mode rules`：四個指標各自獨立門檻（中位數 ± k × MAD 加上絕對上下限），
+任何一項不合格就 reject。
 
 ## 環境安裝
 
@@ -65,6 +69,13 @@ python -m astro_light_selector D:\astro\M31\lights --from-report D:\astro\M31\li
 | `--dry-run` | | 只分析、輸出報表，不搬檔案 |
 | `--workers N` | 1 | 平行處理數 |
 | `--from-report CSV` | | 不重新量測，讀舊報表重套門檻 |
+| `--mode` | score | `score` 評分模式 / `rules` 規則模式 |
+| **評分模式** | | |
+| `--top-frac` | 0.10 | 每個指標取最好的前幾成當範本 |
+| `--pass-pct` | 0.80 | 及格線 = 範本分數 × 此值 |
+| `--margin-k` | 1.5 | 眾數往下容許幾個 MAD |
+| `--weights` | | 例如 `fwhm=0.35,eccentricity=0.3,n_stars=0.2,background=0.15` |
+| **規則模式** | | |
 | `-k` | | 一次設定四個相對門檻的 k |
 | `--fwhm-k` / `--ecc-k` | 1.5 | FWHM / 離心率 的 MAD 倍數 |
 | `--stars-k` | 2.0 | 星點數 的 MAD 倍數 |
@@ -94,6 +105,7 @@ python -m astro_light_selector D:\astro\M31\lights --from-report D:\astro\M31\li
 astro-light-selector/
 ├── src/astro_light_selector/
 │   ├── metrics.py     # 單張影像的品質量測
+│   ├── scoring.py     # 最佳範本評分
 │   ├── selector.py    # keep / reject 判斷
 │   ├── report.py      # CSV 報表與摘要輸出
 │   ├── mover.py       # 搬移 reject 檔案

@@ -72,3 +72,28 @@ def test_cli_dry_run_does_not_move(tmp_path: Path):
     assert not (tmp_path / "rejected").exists()
     for p in files["bad"]:
         assert p.exists()
+
+
+def test_score_mode_flags_bad_frames(tmp_path: Path):
+    from astro_light_selector.scoring import ScoreConfig
+    from astro_light_selector.selector import select_by_score
+
+    files = make_session(tmp_path, n_good=12)
+    frames = [measure(p) for p in files["good"] + files["bad"]]
+    decisions, result = select_by_score(frames, ScoreConfig())
+    by_name = {Path(d.metrics.file).name: d for d in decisions}
+
+    assert 0 < result.threshold <= 100
+    for p in files["good"]:
+        assert by_name[p.name].keep, by_name[p.name].reasons
+        assert by_name[p.name].score is not None and by_name[p.name].score >= result.threshold
+    for p in files["bad"]:
+        assert not by_name[p.name].keep, p.name
+
+
+def test_cli_score_mode_writes_score_column(tmp_path: Path):
+    make_session(tmp_path)
+    assert main([str(tmp_path), "--dry-run", "--mode", "score"]) == 0
+    report = (tmp_path / "selection_report.csv").read_text(encoding="utf-8-sig")
+    header = report.splitlines()[0]
+    assert "score" in header.split(",")

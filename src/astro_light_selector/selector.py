@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .metrics import FrameMetrics
+from .scoring import ScoreConfig, ScoreResult, score_frames
 
 
 @dataclass
@@ -37,6 +38,7 @@ class Decision:
     metrics: FrameMetrics
     keep: bool
     reasons: list[str] = field(default_factory=list)
+    score: float | None = None
 
 
 def _mad(values: np.ndarray) -> float:
@@ -112,3 +114,23 @@ def select(frames: list[FrameMetrics], th: Thresholds) -> list[Decision]:
 
         decisions.append(Decision(f, keep=not reasons, reasons=reasons))
     return decisions
+
+
+def select_by_score(frames: list[FrameMetrics], cfg: ScoreConfig) -> tuple[list[Decision], ScoreResult]:
+    """綜合評分挑片：分數低於門檻 → reject；量不出來的一樣 reject。"""
+    result = score_frames(frames, cfg)
+    decisions: list[Decision] = []
+    for f in frames:
+        if f.file not in result.scores:
+            reason = f"error: {f.error}" if f.error else "無法評分"
+            decisions.append(Decision(f, keep=False, reasons=[reason]))
+            continue
+        sc = result.scores[f.file]
+        if sc < result.threshold:
+            comp = result.components[f.file]
+            worst = min(comp, key=comp.get)
+            reasons = [f"score {sc:.1f} < {result.threshold:.1f} (弱項 {worst} {comp[worst]:.2f})"]
+        else:
+            reasons = []
+        decisions.append(Decision(f, keep=not reasons, reasons=reasons, score=sc))
+    return decisions, result
