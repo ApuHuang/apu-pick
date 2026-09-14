@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+samples/
+output/
+*.fit
+*.fits
+*.fts
+*.xisf
+*.egg-info/
+.pytest_cache/

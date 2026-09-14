@@ -1,0 +1,16 @@
+[project]
+name = "astro-light-selector"
+version = "0.1.0"
+description = "天文 light frame 自動挑片"
+requires-python = ">=3.10"
+dependencies = ["astropy>=6.0", "numpy>=1.26", "photutils>=1.12", "scipy>=1.12"]
+
+[project.scripts]
+astro-select = "astro_light_selector.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
