@@ -1,0 +1,53 @@
+# 用 GitHub 的雲端 Mac 打包 APU Pick 的 Mac 版（PyInstaller 不能在 Windows 上打包 Mac 程式）。
+# 發布 Release 時自動執行，打包好的 zip 會附到那個 Release；也可以在 Actions 頁面手動執行。
+name: 打包 Mac 版
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要附上 Mac 版的 Release 標籤（例如 v0.3.0）；留空就只存成這次執行的成品"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest    # Apple Silicon（M 系列晶片）
+          - runner: macos-15-intel  # Intel Mac（GitHub 提供到 2027 年 8 月）
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安裝
+        run: python -m pip install -e ".[exe]" pytest
+
+      - name: 測試
+        run: python -m pytest -q
+
+      - name: 打包並自動測試打包好的程式
+        run: python packaging/build_exe.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: APUPick-${{ matrix.runner }}
+          path: dist/*.zip
+
+      - name: 附到 Release
+        if: github.event_name == 'release' || inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" dist/*.zip --clobber

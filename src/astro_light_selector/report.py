@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+from .i18n import normalize_error, tr, tr_metric
 from .metrics import FrameMetrics
 from .scoring import ScoreResult
 from .selector import Decision
@@ -33,7 +34,7 @@ def read_csv(path: Path, folder: Path) -> list[FrameMetrics]:
                 exposure=float(row["exposure"]) if row["exposure"] else None,
                 filter=row["filter"] or None,
                 date_obs=row["date_obs"] or None,
-                error=row["error"] or None,
+                error=normalize_error(row["error"]) if row["error"] else None,
             ))
     return frames
 
@@ -49,7 +50,7 @@ def write_csv(decisions: list[Decision], path: Path) -> None:
             row["file"] = Path(row["file"]).name
             row["keep"] = "keep" if d.keep else "reject"
             row["score"] = "" if d.score is None else f"{d.score:.1f}"
-            row["reasons"] = "; ".join(d.reasons)
+            row["reasons"] = "; ".join(str(r) for r in d.reasons)
             row["group"] = d.group
             for key in FLOAT_COLUMNS:
                 v = row[key]
@@ -58,19 +59,17 @@ def write_csv(decisions: list[Decision], path: Path) -> None:
 
 
 def score_summary_lines(result: ScoreResult) -> list[str]:
-    labels = {"fwhm": ("FWHM", ".2f"), "eccentricity": ("ecc", ".2f"),
-              "n_stars": ("stars", ".0f"), "background": ("bkg", ".0f")}
-    parts = [f"{labels[m][0]} {v:{labels[m][1]}}" for m, v in result.reference.items()]
-    how = {
-        "mode": "由眾數決定",
-        "pass_line": "被及格線頂住",
-        "min_score": "指定最低分數",
-        "keep_best": f"只留前段 {sum(s >= result.threshold for s in result.scores.values())} 張",
-    }[result.method]
+    """評分結果的說明（範本、眾數、門檻怎麼來的），用目前的介面語言。"""
+    digits = {"fwhm": ".2f", "eccentricity": ".2f", "n_stars": ".0f", "background": ".0f"}
+    parts = [f"{tr_metric(m)} {v:{digits[m]}}" for m, v in result.reference.items()]
+    if result.method == "keep_best":
+        how = tr("summary.how.keep_best", n=sum(s >= result.threshold for s in result.scores.values()))
+    else:
+        how = tr(f"summary.how.{result.method}")
     return [
-        f"範本（各指標前段平均）: {'  '.join(parts)}",
-        f"分數眾數 {result.mode:.1f}，MAD {result.mad:.1f}，及格線 {result.pass_line:.0f}",
-        f"keep 門檻 = {result.threshold:.1f}（{how}）",
+        tr("summary.reference", parts=tr("summary.part_sep").join(parts)),
+        tr("summary.stats", mode=result.mode, mad=result.mad, pass_line=result.pass_line),
+        tr("summary.threshold", threshold=result.threshold, how=how),
     ]
 
 
@@ -83,8 +82,10 @@ def print_score_summary(result: ScoreResult) -> None:
 def print_summary(decisions: list[Decision]) -> None:
     kept = [d for d in decisions if d.keep]
     rejected = [d for d in decisions if not d.keep]
-    print(f"\n共 {len(decisions)} 張，keep {len(kept)}，reject {len(rejected)}")
+    print()
+    print(tr("summary.total", n=len(decisions), keep=len(kept), reject=len(rejected)))
     if rejected:
-        print("\nReject 清單（分數低到高）：")
+        print()
+        print(tr("summary.reject_list"))
         for d in sorted(rejected, key=lambda d: (d.score is None, d.score or 0)):
-            print(f"  {Path(d.metrics.file).name}: {'; '.join(d.reasons)}")
+            print(f"  {Path(d.metrics.file).name}: {'; '.join(str(r) for r in d.reasons)}")

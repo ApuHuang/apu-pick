@@ -1,4 +1,4 @@
-"""PyInstaller 打包用的進入點。
+"""APU Pick 打包用的進入點（PyInstaller）。
 
 multiprocessing.freeze_support() 一定要最先呼叫：打包後多核心量測的子行程跑的也是這個 exe，
 少了它每個子行程都會再開一個視窗。

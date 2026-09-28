@@ -1,7 +1,9 @@
 [project]
-name = "astro-light-selector"
+name = "apu-pick"
 dynamic = ["version"]
-description = "天文 light frame 自動挑片"
+description = "APU Pick (Astrophotography Pick Utility)：天文攝影 light frame 自動挑片"
+readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = ["astropy>=6.0", "numpy>=1.26", "photutils>=1.12", "scipy>=1.12"]
 
@@ -11,10 +13,10 @@ gui = ["matplotlib>=3.8"]
 exe = ["matplotlib>=3.8", "pyinstaller>=6.0"]
 
 [project.scripts]
-astro-select = "astro_light_selector.cli:main"
+apu-pick = "astro_light_selector.cli:main"
 
 [project.gui-scripts]
-astro-select-gui = "astro_light_selector.gui:main"
+apu-pick-gui = "astro_light_selector.gui:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -27,4 +29,4 @@ where = ["src"]
 version = {attr = "astro_light_selector.__version__"}
 
 [tool.setuptools.package-data]
-astro_light_selector = ["assets/*.ico"]
+astro_light_selector = ["assets/*.ico", "assets/*.png"]

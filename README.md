@@ -1,196 +1,114 @@
-# astro-light-selector
+<p align="center">
+  <img src="docs/logo.png" alt="APU Pick — Astrophotography Pick Utility" width="660">
+</p>
 
-天文攝影 Light frame 自動挑片程式。
+自動幫你從一整批 light frames 裡挑出好片、把爛片移開的小工具。
 
-掃描資料夾中的 FITS light frames，對每張量測品質指標，依門檻自動分類為
-keep / reject，輸出 CSV 報表，並把 reject 的檔案搬到另一個資料夾。
+程式會量每張的星點大小（FWHM）、拖線程度（離心率）、星點數和背景亮度，跟同一批裡最好的片比較後打分數，
+低於門檻的搬到 `rejected` 資料夾。疊圖前先跑一次，就不用再一張一張用肉眼看。
 
-有視窗版（Windows 執行檔，不用裝 Python）跟命令列版兩種用法。
+![程式畫面](docs/screenshot.png)
 
-## 視窗版
+*NGC7635，4 個晚上共 296 張，自動留下 217 張*
 
-把 `AstroLightSelector-<版本>-win64.zip` 解壓縮，執行裡面的 `AstroLightSelector.exe`
-（整個資料夾要一起留著，exe 不能單獨拿出來）。也可以把 light 資料夾直接拖到 exe 上開啟。
+## 特色
 
-1. **瀏覽…** 選放 light frames 的資料夾
-2. **開始量測**：量每張的 FWHM / 離心率 / 星點數 / 背景，幾百張要幾分鐘，可以隨時按停止。
-   量完結果會存成資料夾裡的 `selection_report.csv`，下次打開同一個資料夾會自動讀取，不用重量
-3. **調門檻**：自動 / 最低分數 / 只留最好的 X%，也可以勾選分組方式。改了趨勢圖跟清單會立刻更新
-4. **搬移 reject…**：確認後把 reject 搬到 Reject 資料夾；門檻放寬後再按一次，變成 keep 的會搬回來
-5. **全部還原…**：把 Reject 資料夾裡的檔案全部搬回原位
+- **自動評分**：每張 0~100 分，跟同一批最好的片比較，不用自己決定 FWHM 要幾像素才算好
+- **趨勢圖**：分數和各項指標依拍攝順序排開，哪段有雲、哪段仰角太低、什麼時候天亮，一眼就看得出來
+- **門檻隨你調**：自動、最低分數、只留最好的 X%，改了馬上看到結果
+- **只搬檔、不刪檔**：淘汰的片搬到子資料夾，一鍵就能全部還原
+- **分組評分**：不同濾鏡、曝光時間自動分開算，L 和 Ha 不會互相比較；多晚的資料也能每晚分開算
+- 單色、彩色（OSC）相機的 FITS 檔都支援
+- 介面可以切換繁體中文 / English
 
-疊圖軟體如果會連子資料夾一起掃（例如 WBPP 的「+ Directory」），把 Reject 資料夾改到
-light 資料夾外面，才不會把 reject 的也疊進去。
+## 下載
 
-從原始碼執行視窗版：`python -m astro_light_selector.gui`（需要 matplotlib）。
+到 [Releases 頁面](../../releases/latest) 下載對應的檔案，不用另外安裝 Python：
 
-### 自己打包 exe
-
-```bash
-pip install -e .[exe]
-python packaging/build_exe.py
-```
-
-產出 `dist\AstroLightSelector\AstroLightSelector.exe` 和分享用的 zip。打包完會自動用合成星場跑一次 exe，
-確認量測（含多核心）與畫圖正常。圖示由 `packaging/make_icon.py` 產生。
-
-## 量測的指標
-
-| 指標 | 說明 |
+| 系統 | 檔案 |
 |---|---|
-| `n_stars` | 偵測到的星點數量（雲、霧、對焦跑掉時會明顯下降） |
-| `fwhm` | 對最亮 100 顆星做橢圓 2D Gaussian 擬合的 FWHM 中位數（像素） |
-| `eccentricity` | 星點離心率中位數，0 = 正圓，越大越拖線 |
-| `background` | 背景亮度中位數（ADU），雲 / 月光 / 光害會拉高 |
-| `noise` | 背景雜訊標準差 |
-| `snr` | 星點峰值 / 背景雜訊 |
-| `saturated_frac` | 飽和像素比例 |
+| Windows 10 / 11（64 位元） | `APUPick-版本-win64.zip` |
+| Mac（Apple M 系列晶片） | `APUPick-版本-macos-arm64.zip` |
+| Mac（Intel 處理器） | `APUPick-版本-macos-x86_64.zip` |
 
-OSC（Bayer）影像會先做 2x2 super-pixel 再偵測，FWHM 會換算回原始像素尺度。
+### Windows
 
-## 挑片邏輯
+1. 在下載的 zip 上按右鍵 →「**全部解壓縮**」
+2. 打開解壓出來的資料夾，雙擊 `APUPick.exe`
 
-預設是**評分模式**（`--mode score`）：
+> 第一次開啟時，Windows 可能會跳出「Windows 已保護您的電腦」。這是因為程式沒有購買數位簽章，
+> 按「**其他資訊**」→「**仍要執行**」即可。
 
-1. 讀不到、偵測不到星、能擬合的星 < 10 顆（被雲遮住）→ 直接 reject
-2. 每個指標各取整批最好的前 10% 平均，組成「最佳範本」
-3. 每張影像每個指標換算成相對範本的比例（範本 = 1，上限 1），加權後 × 100 = 分數
-   - FWHM 35%、離心率 30%、星點數 20%、背景 15%
-4. 用 KDE 找分數分布的峰值（眾數）
-5. keep 門檻 = max(眾數 − 1.5 × MAD, 100 × 80%)
-   - 平常由眾數決定；整批偏差、眾數掉到及格線以下時，由及格線頂住
-   - MAD 最小算 2 分：整批品質很一致時，不會因為差零點幾分就被 reject
+### Mac（測試中）
 
-不想用自動門檻的話，可以直接指定（兩者擇一，都是每組各自算）：
+1. 雙擊下載的 zip 解壓縮，把 `APUPick.app` 拖到「應用程式」資料夾
+2. 第一次開啟會被系統擋下，因為程式沒有 Apple 的付費簽章：
+   到「**系統設定**」→「**隱私權與安全性**」，往下捲會看到 APUPick 被阻擋的訊息，按「**仍要打開**」，
+   輸入密碼後再按一次「打開」就可以了
 
-- `--min-score 85`：分數低於 85 就 reject
-- `--keep-best 0.7`：只留分數最高的前 70%（以能評分的張數計算；量不出來的一律 reject，不算在內）
+不知道自己的 Mac 是哪一種？點左上角蘋果選單 →「關於這台 Mac」，晶片寫 Apple M1、M2… 就是 M 系列，寫 Intel 就是 Intel。
 
-### 分組
+> Mac 版是在雲端自動打包的，作者手邊沒有 Mac 可以實際操作，遇到問題請告訴我。
 
-預設依**濾鏡 + 曝光時間**分組，每組各自算範本和門檻。L 跟 Ha、60s 跟 300s 的背景和星點數
-差好幾倍，混在一起算會把整組窄頻或短曝光的全部 reject。
+## 使用方式
 
-多晚的資料可以加上 `night`（`--group-by filter,exposure,night`），每晚各自比較。
-「一晚」是依 DATE-OBS 相鄰兩張間隔超過 4 小時切開的，跨過午夜也算同一晚。
+1. 按右上角 **開啟**，選放 light frames 的資料夾（Windows 也可以把資料夾直接拖到 exe 上）
+2. 按 **量測**：幾百張大約幾分鐘，進度和剩餘時間顯示在最下面的狀態列，量測中可以按 **停止**
+3. 看趨勢圖和清單，需要的話在右側「**保留門檻**」調整，畫面會立刻更新
+4. 滿意後按右上角 **搬移淘汰片**，淘汰的片會搬到 `rejected` 子資料夾
+5. 搬錯了就在右側「**淘汰片**」按 **全部還原…**，全部搬回原位
 
-也可以用 `--mode rules`：四個指標各自獨立門檻（中位數 ± k × MAD 加上絕對上下限），
-任何一項不合格就 reject。
+右上角的「繁中｜EN」可以切換介面語言；右側每一組標題旁的 ⓘ 有詳細說明。
 
-## 環境安裝
+量測結果會存成資料夾裡的 `selection_report.csv`，下次打開同一個資料夾會自動讀取，不用重新量測。
+門檻放寬後再按一次搬移，變成保留的片會自動搬回來。
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
+## 評分方式
 
-## 命令列版使用方式
+1. 每張量 4 個指標：**FWHM**（星點大小）、**離心率**（拖線程度）、**星點數**（透明度）、**背景**（天空亮度）
+2. 每個指標取這一批最好的 10% 平均，當作「範本」
+3. 每張的各項指標跟範本比較，換算成 0~1（跟範本一樣好就是 1）
+4. 加權相加再 × 100 就是分數：FWHM 35%、離心率 30%、星點數 20%、背景 15%
+5. 自動門檻：「分數眾數 − 1.5 × MAD」和「80 分」取較高者
 
-```bash
-# 先用 dry-run 看結果，不搬檔案
-python -m astro_light_selector D:\astro\M31\lights --dry-run
+完全量不到星的片（例如整張被雲遮住）會直接淘汰。「清單」分頁有每張的分數和弱項，
+「門檻細節」分頁有範本和門檻的計算過程。
 
-# 正式執行：reject 的搬到 <folder>\rejected，報表存 <folder>\selection_report.csv
-python -m astro_light_selector D:\astro\M31\lights
+## 常見問題
 
-# 多核心平行處理、自訂門檻
-python -m astro_light_selector D:\astro\M31\lights --workers 4 -k 2 --max-fwhm 5 --min-stars 50
+**打不開？**
 
-# 調門檻不用重新量測：讀上次的報表重套
-python -m astro_light_selector D:\astro\M31\lights --from-report D:\astro\M31\lights\selection_report.csv -k 1.2 --dry-run
+- Windows：要先解壓縮，不能直接在 zip 裡面點；`APUPick.exe` 要跟旁邊的 `_internal` 資料夾放在一起，
+  想放在桌面的話請用「建立捷徑」
+- Mac：請看上面「Mac」的說明
 
-# 直接指定門檻：分數 85 以下 reject，或只留最好的 70%
-python -m astro_light_selector D:\astro\M31\lights --min-score 85 --dry-run
-python -m astro_light_selector D:\astro\M31\lights --keep-best 0.7 --dry-run
+**支援哪些檔案？**
 
-# 多晚資料每晚分開比較，並輸出趨勢圖 <folder>\selection_plot.png
-python -m astro_light_selector D:\astro\M31\lights --group-by filter,exposure,night --plot --dry-run
+FITS 檔（`.fit`、`.fits`、`.fts`），單色和彩色相機都可以。XISF 目前不支援。
 
-# 後悔了：把 rejected 裡的檔案全部搬回原位
-python -m astro_light_selector D:\astro\M31\lights --restore
-```
+**用 PixInsight WBPP 疊圖要注意什麼？**
 
-趨勢圖需要 matplotlib（`pip install matplotlib`）。圖上依分組、拍攝順序排列各指標，
-keep 藍點、reject 紅叉，分數格的虛線是每組的 keep 門檻；超出範圍的極端值（天亮、厚雲）
-會用三角形貼在邊上。
+WBPP 的「+ Directory」會連子資料夾一起加入，`rejected` 裡的片也會被加進去。
+可以改用「+ Lights」只選外層的檔案，或在右側「淘汰片」按「變更…」，把淘汰片資料夾改到 light 資料夾外面。
 
-### 搬檔與重跑
+**量測時電腦很卡？**
 
-- 只搬 reject 的，keep 的不動；同名檔案不覆蓋，自動改名 `_1`、`_2`…
-- 每次搬移都記在 reject 資料夾的 `moves.csv`（原位置 → 目前位置）
-- **重跑時檔案位置會跟著新結果走**：門檻放寬後變成 keep 的，會自動從 rejected 搬回原位；
-  收緊後新的 reject 照常搬出去。`--from-report` 或重新量測都一樣
-- 重新量測時，之前被程式搬去 rejected 的也會一起量、算進同一批。門檻是相對整批算的，
-  只看留下來的會越挑越嚴
-- 自己手動丟進 rejected 的檔案（`moves.csv` 裡沒有的）程式不會動，也不會算進來
-- 重跑時 `--reject-dir` 要跟上次一樣，程式才找得到紀錄
-- `--restore` 把 rejected 裡的全部搬回原位（包含手動丟進去的）
+把右側「量測」裡的「平行處理數」調低。數字越大越快，但也越吃記憶體。
 
-也可以 `pip install -e .` 之後直接用 `astro-select <folder>` 指令。
+**會刪掉我的檔案嗎？**
 
-完整參數：`python -m astro_light_selector --help`
+不會。程式只會搬移檔案，不會刪除任何東西。
 
-| 參數 | 預設 | 說明 |
-|---|---|---|
-| `--reject-dir` | `<folder>/rejected` | reject 檔案搬去的資料夾 |
-| `--report` | `<folder>/selection_report.csv` | CSV 報表路徑 |
-| `--dry-run` | | 只分析、輸出報表，不搬檔案 |
-| `--workers N` | 1 | 平行處理數 |
-| `--from-report CSV` | | 不重新量測，讀舊報表重套門檻 |
-| `--mode` | score | `score` 評分模式 / `rules` 規則模式 |
-| `--group-by` | `filter,exposure` | 分組欄位（`filter` / `exposure` / `night`），`none` 表示整批一起算 |
-| `--plot [PNG]` | | 輸出趨勢圖（預設 `<folder>/selection_plot.png`） |
-| `--restore` | | 把 reject 資料夾的檔案搬回原位後結束 |
-| **評分模式** | | |
-| `--top-frac` | 0.10 | 每個指標取最好的前幾成當範本 |
-| `--pass-pct` | 0.80 | 及格線 = 範本分數 × 此值 |
-| `--margin-k` | 1.5 | 眾數往下容許幾個 MAD |
-| `--weights` | | 例如 `fwhm=0.35,eccentricity=0.3,n_stars=0.2,background=0.15` |
-| `--min-score` | | 直接指定門檻（0~100），取代自動門檻 |
-| `--keep-best` | | 只留分數最高的這個比例（0~1），取代自動門檻 |
-| **規則模式** | | |
-| `-k` | | 一次設定四個相對門檻的 k |
-| `--fwhm-k` / `--ecc-k` | 1.5 | FWHM / 離心率 的 MAD 倍數 |
-| `--stars-k` | 2.0 | 星點數 的 MAD 倍數 |
-| `--background-k` | 3.0 | 背景 的 MAD 倍數 |
-| `--max-fwhm` | 不用 | FWHM 絕對上限（像素） |
-| `--min-stars` | 20 | 星點數絕對下限 |
-| `--max-ecc` | 0.7 | 離心率絕對上限 |
-| `--max-saturated` | 不用 | 飽和像素比例上限 |
+## 意見回饋
 
-絕對門檻設 `-1` 表示不使用。
+有問題或建議，直接到 Threads 私訊我：[@apu_astrophotography](https://www.threads.com/@apu_astrophotography)
 
-## 測試
+也可以到 [Issues](../../issues) 留言。
 
-```bash
-.venv\Scripts\python -m pytest
-```
+## 進階
 
-`tests/synth.py` 可產生合成星場來試跑：
+命令列版、完整參數、自己打包的方法，請看[進階說明](docs/advanced.md)。
 
-```bash
-.venv\Scripts\python tests/synth.py samples
-```
+## 授權
 
-## 專案結構
-
-```
-astro-light-selector/
-├── src/astro_light_selector/
-│   ├── metrics.py     # 單張影像的品質量測
-│   ├── scoring.py     # 最佳範本評分
-│   ├── grouping.py    # 依濾鏡 / 曝光 / 夜晚分組
-│   ├── selector.py    # keep / reject 判斷
-│   ├── report.py      # CSV 報表與摘要輸出
-│   ├── mover.py       # 搬移 / 還原 reject 檔案
-│   ├── plot.py        # 趨勢圖
-│   ├── pipeline.py    # 量測 → 分組 → 挑片流程（命令列、視窗共用）
-│   ├── cli.py         # 命令列介面
-│   ├── gui.py         # 視窗介面
-│   └── assets/        # 程式圖示
-├── packaging/         # 打包 exe：build_exe.py、進入點、圖示產生
-├── tests/
-├── samples/           # 測試用 FITS（不進 git）
-└── requirements.txt
-```
+[MIT License](LICENSE)

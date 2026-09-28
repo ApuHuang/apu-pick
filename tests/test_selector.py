@@ -111,7 +111,7 @@ def test_group_by_filter_scores_each_filter_separately(tmp_path: Path):
     frames = [measure(p) for p in sorted(tmp_path.glob("*.fits"))]
 
     groups = group_frames(frames, ("filter",))
-    assert sorted(groups) == ["filter=Ha", "filter=L"]
+    assert sorted(groups) == ["濾鏡 Ha", "濾鏡 L"]
     for members in groups.values():
         decisions, _ = select_by_score(members, ScoreConfig())
         assert all(d.keep for d in decisions), [d.reasons for d in decisions if not d.keep]
@@ -289,3 +289,38 @@ def test_rerun_leaves_manual_rejects_alone(tmp_path: Path):
     assert (tmp_path / "bad_seeing.fits").exists()  # 從 bad_seeing_1 搬回原名
     assert same_name.exists() and manual.exists()   # 手動丟的沒被動
     assert not (tmp_path / "manual.fits").exists()
+
+
+def test_reasons_and_errors_follow_language():
+    from astro_light_selector import i18n
+    from astro_light_selector.metrics import FrameMetrics
+    from astro_light_selector.scoring import ScoreConfig
+    from astro_light_selector.selector import select_by_score
+
+    frames = _synthetic_frames(10) + [
+        FrameMetrics("cloud", 0, float("nan"), float("nan"), 3000, 10, 0, 0, 120.0, "L", None,
+                     error="few_fit_stars:5")
+    ]
+    decisions, _ = select_by_score(frames, ScoreConfig(min_score=90))
+    low = next(d for d in decisions if not d.keep and d.score is not None)
+    cloud = decisions[-1]
+    try:
+        assert str(low.reasons[0]).startswith("分數 ") and "弱項：FWHM" in str(low.reasons[0])
+        assert str(cloud.reasons[0]) == "只有 5 顆星能擬合，可能被雲遮住或只剩熱像素"
+        i18n.set_language("en")
+        assert str(low.reasons[0]).startswith("Score ") and "weakest: FWHM" in str(low.reasons[0])
+        assert str(cloud.reasons[0]).startswith("Only 5 stars could be fitted")
+    finally:
+        i18n.set_language(i18n.DEFAULT_LANGUAGE)
+
+
+def test_old_report_error_text_is_understood(tmp_path: Path):
+    from astro_light_selector.report import read_csv
+
+    report = tmp_path / "old.csv"
+    report.write_text(
+        "file,keep,score,reasons,n_stars,fwhm,eccentricity,background,noise,snr,saturated_frac,"
+        "exposure,filter,date_obs,error\n"
+        "a.fit,reject,,,671,,,1500,20,5,0,300.0,,2026-09-06T01:25:27,"
+        "只有 5 顆星能擬合，可能被雲遮住或只剩熱像素\n", encoding="utf-8-sig")
+    assert read_csv(report, tmp_path)[0].error == "few_fit_stars:5"

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from .grouping import GROUP_KEYS, parse_group_keys
+from .i18n import APP_NAME, APP_SUBTITLE, tr, tr_error
 from .metrics import FrameMetrics
 from .mover import restore_rejected, sync_files
 from .pipeline import REJECT_DIR_NAME, REPORT_NAME, collect_files, decide, measure_files
@@ -17,13 +18,13 @@ from .selector import Thresholds
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="astro_light_selector",
-        description="天文 light frame 自動挑片：計算 FWHM / 星點數 / 離心率 / 背景，"
-                    "將不合格的搬到 rejected 資料夾。",
+        prog="apu-pick",
+        description=f"{APP_NAME}（{APP_SUBTITLE}）：量每張 light frame 的 FWHM、星點數、離心率、背景，"
+                    "打分數後把淘汰的搬到 rejected 資料夾。",
     )
     p.add_argument("folder", type=Path, help="放 light frames 的資料夾")
     p.add_argument("--reject-dir", type=Path, default=None,
-                   help="reject 檔案搬去的資料夾（預設 <folder>/rejected）")
+                   help="淘汰片搬去的資料夾（預設 <folder>/rejected）")
     p.add_argument("--report", type=Path, default=None,
                    help="CSV 報表路徑（預設 <folder>/selection_report.csv）")
     p.add_argument("--dry-run", action="store_true", help="只分析與輸出報表，不搬檔案")
@@ -48,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="權重，例如 fwhm=0.35,eccentricity=0.3,n_stars=0.2,background=0.15")
     direct = g.add_mutually_exclusive_group()
     direct.add_argument("--min-score", type=float, default=None,
-                        help="直接指定門檻：分數低於此值就 reject（0~100，取代自動門檻）")
+                        help="直接指定門檻：分數低於此值就淘汰（0~100，取代自動門檻）")
     direct.add_argument("--keep-best", type=float, default=None,
                         help="只留能評分的影像中分數最高的這個比例，例如 0.7 = 前 70%%（每組各自算）")
 
@@ -92,10 +93,10 @@ def _parse_weights(text: str | None) -> dict[str, float] | None:
 def _progress(i: int, n: int, m: FrameMetrics) -> None:
     name = Path(m.file).name
     if m.error:
-        print(f"[{i}/{n}] {name}: ERROR {m.error}")
+        print(f"[{i}/{n}] {name}：錯誤 {tr_error(m.error)}")
     else:
-        print(f"[{i}/{n}] {name}: stars={m.n_stars} fwhm={m.fwhm:.2f} "
-              f"ecc={m.eccentricity:.2f} bkg={m.background:.0f}")
+        print(f"[{i}/{n}] {name}：星點 {m.n_stars}、FWHM {m.fwhm:.2f}、"
+              f"離心率 {m.eccentricity:.2f}、背景 {m.background:.0f}")
 
 
 def _build_thresholds(args: argparse.Namespace) -> Thresholds:
@@ -156,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         if not files:
             print(f"{folder} 內沒有 FITS 檔案", file=sys.stderr)
             return 1
-        extra = f"（含之前 reject 的 {len(home_of)} 張）" if home_of else ""
+        extra = f"（含之前淘汰的 {len(home_of)} 張）" if home_of else ""
         print(f"分析 {len(files)} 張影像{extra}...")
         frames = measure_files(files, args.workers, progress=_progress, home_of=home_of)
 
@@ -173,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.mode == "score":
             result = sel.results[label]
             if result is None:
-                print("這組沒有任何一張能量測，全部 reject")
+                print(tr("summary.no_measurable"))
             else:
                 print_score_summary(result)
     decisions = sel.decisions
@@ -198,5 +199,5 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{verb} {len(moved_out)} 張到 {reject_dir}")
     if moved_back:
         verb = "預計搬回" if args.dry_run else "已搬回"
-        print(f"{verb} {len(moved_back)} 張這次變成 keep 的到原位")
+        print(f"{verb} {len(moved_back)} 張這次變成保留的到原位")
     return 0

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from .i18n import tr
 from .metrics import FrameMetrics
 
 GROUP_KEYS = ("filter", "exposure", "night")
@@ -57,7 +58,10 @@ def _fmt_exposure(v: float | None) -> str:
 
 
 def group_frames(frames: list[FrameMetrics], keys: tuple[str, ...]) -> dict[str, list[FrameMetrics]]:
-    """回傳 {分組標籤: 影像清單}，保留原本順序。keys 為空時整批一組（標籤為空字串）。"""
+    """回傳 {分組標籤: 影像清單}，保留原本順序。keys 為空時整批一組（標籤為空字串）。
+
+    標籤用目前的介面語言組成，例如「濾鏡 L／曝光 300s」。
+    """
     if not keys:
         return {"": list(frames)}
     nights = assign_nights(frames) if "night" in keys else {}
@@ -66,10 +70,10 @@ def group_frames(frames: list[FrameMetrics], keys: tuple[str, ...]) -> dict[str,
         parts = []
         for k in keys:
             if k == "filter":
-                parts.append(f"filter={f.filter or '-'}")
+                parts.append(tr("group.filter", value=f.filter) if f.filter else tr("group.no_filter"))
             elif k == "exposure":
-                parts.append(f"exp={_fmt_exposure(f.exposure)}")
+                parts.append(tr("group.exposure", value=_fmt_exposure(f.exposure)))
             else:
-                parts.append(f"night={nights.get(f.file, '?')}")
-        groups.setdefault(" ".join(parts), []).append(f)
+                parts.append(tr("group.night", value=nights.get(f.file, "?")))
+        groups.setdefault(tr("group.sep").join(parts), []).append(f)
     return groups

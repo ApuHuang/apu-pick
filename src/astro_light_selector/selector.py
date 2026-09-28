@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .i18n import tr, tr_error, tr_metric
 from .metrics import FrameMetrics
 from .scoring import ScoreConfig, ScoreResult, score_frames
 
@@ -34,10 +35,29 @@ class Thresholds:
 
 
 @dataclass
+class Reason:
+    """淘汰原因：存代號跟數值，顯示時才依目前語言轉成文字（str(reason)）。"""
+    code: str
+    params: dict = field(default_factory=dict)
+
+    def __str__(self) -> str:
+        if self.code == "error":
+            return tr_error(self.params["error"])
+        params = dict(self.params)
+        if "metric" in params:
+            params["metric"] = tr_metric(params["metric"])
+        return tr(f"reason.{self.code}", **params)
+
+
+def _error_reason(f: FrameMetrics) -> Reason:
+    return Reason("error", {"error": f.error}) if f.error else Reason("unscorable")
+
+
+@dataclass
 class Decision:
     metrics: FrameMetrics
     keep: bool
-    reasons: list[str] = field(default_factory=list)
+    reasons: list[Reason] = field(default_factory=list)
     score: float | None = None
     group: str = ""
 
@@ -84,10 +104,10 @@ def select(frames: list[FrameMetrics], th: Thresholds) -> list[Decision]:
 
     decisions: list[Decision] = []
     for f in frames:
-        reasons: list[str] = []
+        reasons: list[Reason] = []
         if f.error is not None:
             if th.reject_errors:
-                reasons.append(f"error: {f.error}")
+                reasons.append(_error_reason(f))
             decisions.append(Decision(f, keep=not reasons, reasons=reasons))
             continue
 
@@ -95,23 +115,23 @@ def select(frames: list[FrameMetrics], th: Thresholds) -> list[Decision]:
 
         # 相對門檻
         if fwhm_hi is not None and f.fwhm > fwhm_hi:
-            reasons.append(f"FWHM {f.fwhm:.2f} > {fwhm_hi:.2f}")
+            reasons.append(Reason("fwhm_high", {"value": f.fwhm, "limit": fwhm_hi}))
         if stars_lo is not None and f.n_stars < stars_lo:
-            reasons.append(f"stars {f.n_stars} < {stars_lo:.0f}")
+            reasons.append(Reason("stars_low", {"value": f.n_stars, "limit": stars_lo}))
         if ecc_hi is not None and has_ecc and f.eccentricity > ecc_hi:
-            reasons.append(f"ecc {f.eccentricity:.2f} > {ecc_hi:.2f}")
+            reasons.append(Reason("ecc_high", {"value": f.eccentricity, "limit": ecc_hi}))
         if bkg_hi is not None and f.background > bkg_hi:
-            reasons.append(f"background {f.background:.0f} > {bkg_hi:.0f}")
+            reasons.append(Reason("bkg_high", {"value": f.background, "limit": bkg_hi}))
 
         # 絕對門檻
         if th.max_fwhm is not None and f.fwhm > th.max_fwhm:
-            reasons.append(f"FWHM {f.fwhm:.2f} > max {th.max_fwhm}")
+            reasons.append(Reason("fwhm_max", {"value": f.fwhm, "limit": th.max_fwhm}))
         if th.min_stars is not None and f.n_stars < th.min_stars:
-            reasons.append(f"stars {f.n_stars} < min {th.min_stars}")
+            reasons.append(Reason("stars_min", {"value": f.n_stars, "limit": th.min_stars}))
         if th.max_eccentricity is not None and has_ecc and f.eccentricity > th.max_eccentricity:
-            reasons.append(f"ecc {f.eccentricity:.2f} > max {th.max_eccentricity}")
+            reasons.append(Reason("ecc_max", {"value": f.eccentricity, "limit": th.max_eccentricity}))
         if th.max_saturated_frac is not None and f.saturated_frac > th.max_saturated_frac:
-            reasons.append(f"saturated {f.saturated_frac:.4f} > max {th.max_saturated_frac}")
+            reasons.append(Reason("saturated_max", {"value": f.saturated_frac, "limit": th.max_saturated_frac}))
 
         decisions.append(Decision(f, keep=not reasons, reasons=reasons))
     return decisions
@@ -126,19 +146,19 @@ def select_by_score(frames: list[FrameMetrics],
     try:
         result = score_frames(frames, cfg)
     except ValueError:
-        return [Decision(f, keep=False, reasons=[f"error: {f.error}" if f.error else "無法評分"])
+        return [Decision(f, keep=False, reasons=[_error_reason(f)])
                 for f in frames], None
     decisions: list[Decision] = []
     for f in frames:
         if f.file not in result.scores:
-            reason = f"error: {f.error}" if f.error else "無法評分"
-            decisions.append(Decision(f, keep=False, reasons=[reason]))
+            decisions.append(Decision(f, keep=False, reasons=[_error_reason(f)]))
             continue
         sc = result.scores[f.file]
         if sc < result.threshold:
             comp = result.components[f.file]
             worst = min(comp, key=comp.get)
-            reasons = [f"score {sc:.1f} < {result.threshold:.1f} (弱項 {worst} {comp[worst]:.2f})"]
+            reasons = [Reason("score_low", {"score": sc, "threshold": result.threshold,
+                                            "metric": worst, "ratio": comp[worst]})]
         else:
             reasons = []
         decisions.append(Decision(f, keep=not reasons, reasons=reasons, score=sc))

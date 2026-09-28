@@ -9,6 +9,17 @@ import pytest
 from .synth import make_session
 
 
+@pytest.fixture(autouse=True)
+def isolated_settings(tmp_path_factory, monkeypatch):
+    """測試不能動到使用者真正的設定檔，也要把語言還原成預設。"""
+    from astro_light_selector import i18n, settings
+
+    cfg = tmp_path_factory.mktemp("config")
+    monkeypatch.setattr(settings, "config_dir", lambda: cfg)
+    yield cfg
+    i18n.set_language(i18n.DEFAULT_LANGUAGE)
+
+
 @pytest.fixture
 def root():
     try:
@@ -49,7 +60,7 @@ def test_gui_measure_adjust_move_restore(tmp_path: Path, root: tk.Tk, monkeypatc
     assert len(app.selection.decisions) == len(files["good"]) + len(files["bad"])
     rejected = {Path(d.metrics.file).name for d in app.selection.decisions if not d.keep}
     assert rejected == {p.name for p in files["bad"]}
-    assert "reject 3" in app.summary_var.get()
+    assert "淘汰 3" in app.summary_var.get()
     assert len(app.tree.get_children()) == 11
     app.only_reject_var.set(True)
     assert len(app.tree.get_children()) == 3
@@ -64,7 +75,7 @@ def test_gui_measure_adjust_move_restore(tmp_path: Path, root: tk.Tk, monkeypatc
     app.method_var.set("auto")
     _pump(root, lambda: app._apply_job is None)
     app._move()
-    assert "3 張 reject" in asked[-1]
+    assert "3 張淘汰片" in asked[-1]
     assert sorted(p.name for p in (tmp_path / "rejected").glob("*.fits")) == sorted(p.name for p in files["bad"])
 
     app._restore()
@@ -87,7 +98,39 @@ def test_gui_bad_threshold_input_is_ignored(tmp_path: Path, root: tk.Tk):
     before = app.selection
 
     app.method_var.set("keep_best")
-    app.keep_best_var.set("abc")  # 還沒打完的數字
+    app.keep_best_var.set(0)  # 一張都不留：不合理
     _pump(root, lambda: app._apply_job is None)
     assert app.selection is before
     assert "門檻數字不合理" in app.status_var.get()
+
+
+def test_gui_switch_language_keeps_results(tmp_path: Path, root: tk.Tk, isolated_settings: Path):
+    import json
+
+    from astro_light_selector import gui, i18n
+
+    files = make_session(tmp_path, n_good=5)
+    app = gui.App(root, str(tmp_path))
+    app.workers_var.set("1")
+    app._start_measure()
+    _pump(root, lambda: app.selection is not None and not app._busy())
+    n_reject = sum(not d.keep for d in app.selection.decisions)
+    assert f"淘汰 {n_reject}" in app.summary_var.get()
+
+    app._set_language("en")
+    _pump(root, lambda: i18n.get_language() == "en" and app.measure_btn.winfo_exists())
+    # 結果沒丟，文字全換成英文
+    assert len(app.selection.decisions) == len(files["good"]) + len(files["bad"])
+    assert f"{n_reject} rejected" in app.summary_var.get()
+    assert app.status_var.get().startswith("Done:")
+    assert app.measure_btn.cget("text") == "Measure Again"
+    assert app.metrics["rejected"].value.cget("text") == str(n_reject)
+    first = app.tree.get_children()[0]
+    assert app.tree.set(first, "result") in ("Keep", "Reject")
+    reasons = [app.tree.set(i, "reason") for i in app.tree.get_children() if app.tree.set(i, "reason")]
+    assert reasons and all("分數" not in r and "弱項" not in r for r in reasons)
+    assert json.loads((isolated_settings / "settings.json").read_text(encoding="utf-8")) == {"language": "en"}
+
+    app._set_language("zh")
+    _pump(root, lambda: i18n.get_language() == "zh" and app.measure_btn.winfo_exists())
+    assert f"淘汰 {n_reject}" in app.summary_var.get()

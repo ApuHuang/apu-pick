@@ -58,7 +58,7 @@ def load_image(path: Path) -> tuple[np.ndarray, fits.Header]:
     if data.ndim == 3:
         data = data.mean(axis=0) if data.shape[0] <= 4 else data.mean(axis=2)
     if data.ndim != 2:
-        raise ValueError(f"不支援的影像維度: {data.shape}")
+        raise ValueError(f"unsupported image shape {data.shape}")
 
     return data, header
 
@@ -132,7 +132,7 @@ def measure(path: Path) -> FrameMetrics:
     try:
         data, header = load_image(path)
     except Exception as exc:  # noqa: BLE001
-        return FrameMetrics(**base, error=f"讀取失敗: {exc}")
+        return FrameMetrics(**base, error=f"read_failed:{exc}")
 
     base.update(
         exposure=header.get("EXPTIME") or header.get("EXPOSURE"),
@@ -152,7 +152,7 @@ def measure(path: Path) -> FrameMetrics:
     _, bkg_median, bkg_std = sigma_clipped_stats(data, sigma=3.0, maxiters=5)
     base.update(background=float(bkg_median), noise=float(bkg_std), saturated_frac=saturated_frac)
     if not np.isfinite(bkg_std) or bkg_std <= 0:
-        return FrameMetrics(**base, error="背景雜訊為 0，可能是空白影像")
+        return FrameMetrics(**base, error="blank")
 
     finder = IRAFStarFinder(
         threshold=DETECT_SIGMA * bkg_std,
@@ -167,7 +167,7 @@ def measure(path: Path) -> FrameMetrics:
     sub = data - bkg_median
     sources = finder(sub)
     if sources is None or len(sources) == 0:
-        return FrameMetrics(**base, error="偵測不到星點")
+        return FrameMetrics(**base, error="no_stars")
 
     base.update(n_stars=int(len(sources)), snr=float(np.median(sources["peak"] / bkg_std)))
 
@@ -184,7 +184,7 @@ def measure(path: Path) -> FrameMetrics:
                 fwhms.append(shape[0])
                 eccs.append(shape[1])
     if len(fwhms) < MIN_FIT_STARS:
-        return FrameMetrics(**base, error=f"只有 {len(fwhms)} 顆星能擬合，可能被雲遮住或只剩熱像素")
+        return FrameMetrics(**base, error=f"few_fit_stars:{len(fwhms)}")
 
     base.update(
         fwhm=float(np.median(fwhms)) * scale,
