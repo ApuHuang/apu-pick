@@ -20,37 +20,71 @@ def isolated_settings(tmp_path_factory, monkeypatch):
     i18n.set_language(i18n.DEFAULT_LANGUAGE)
 
 
-@pytest.fixture
-def root():
+@pytest.fixture(autouse=True)
+def dialogs(monkeypatch):
+    """所有對話框都換成假的：沒人能按的雲端機器上，真的對話框會讓測試永遠卡住。
+
+    詢問一律回答「是」並記下內容；錯誤、警告記下來，_pump 看到就讓測試失敗。
+    """
+    from astro_light_selector import gui
+
+    _ERRORS.clear()
+    record = {"asked": [], "errors": _ERRORS}
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda title, msg: record["asked"].append(msg) or True)
+    monkeypatch.setattr(gui.messagebox, "showinfo", lambda *a, **k: None)
+    monkeypatch.setattr(gui.messagebox, "showwarning", lambda title, msg: _ERRORS.append(msg))
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda title, msg: _ERRORS.append(msg))
+    return record
+
+
+_ERRORS: list[str] = []
+
+
+@pytest.fixture(scope="session")
+def tk_root():
+    """整個測試只建一個 Tk：同一個行程反覆建立、關閉 Tk，Windows 偶爾找不到 tk.tcl，Mac 上會卡住。"""
     try:
         r = tk.Tk()
-    except tk.TclError:
-        pytest.skip("沒有圖形環境")
+    except tk.TclError as exc:
+        pytest.skip(f"沒有圖形環境：{exc}")
     r.withdraw()
     yield r
     r.destroy()
 
 
+@pytest.fixture
+def make_app(tk_root):
+    """建立 App；測試結束時停掉它的計時器、清掉畫面，下一個測試再用同一個 Tk。"""
+    from astro_light_selector import gui
+
+    apps = []
+
+    def make(folder):
+        app = gui.App(tk_root, str(folder))
+        apps.append(app)
+        return app
+
+    yield make
+    for app in apps:
+        app.close()
+
+
 def _pump(root: tk.Tk, cond, timeout: float = 180) -> None:
-    """跑 Tk 的事件迴圈直到 cond() 成立。"""
+    """跑 Tk 的事件迴圈直到 cond() 成立；程式跳出錯誤對話框就直接失敗。"""
     end = time.monotonic() + timeout
     while not cond():
         root.update()
+        if _ERRORS:
+            pytest.fail("程式顯示了錯誤：\n" + "\n".join(_ERRORS))
         if time.monotonic() > end:
             raise TimeoutError
         time.sleep(0.02)
 
 
-def test_gui_measure_adjust_move_restore(tmp_path: Path, root: tk.Tk, monkeypatch):
-    from astro_light_selector import gui
-
+def test_gui_measure_adjust_move_restore(tmp_path: Path, make_app, dialogs):
     files = make_session(tmp_path)
-    asked: list[str] = []
-    monkeypatch.setattr(gui.messagebox, "askyesno", lambda title, msg: asked.append(msg) or True)
-    monkeypatch.setattr(gui.messagebox, "showinfo", lambda *a, **k: None)
-    monkeypatch.setattr(gui.messagebox, "showerror", lambda title, msg: pytest.fail(msg))
-
-    app = gui.App(root, str(tmp_path))
+    app = make_app(tmp_path)
+    root = app.root
     assert app.selection is None
     app.workers_var.set("2")  # 走多核心那條路
     app._start_measure()
@@ -75,7 +109,7 @@ def test_gui_measure_adjust_move_restore(tmp_path: Path, root: tk.Tk, monkeypatc
     app.method_var.set("auto")
     _pump(root, lambda: app._apply_job is None)
     app._move()
-    assert "3 張淘汰片" in asked[-1]
+    assert "3 張淘汰片" in dialogs["asked"][-1]
     assert sorted(p.name for p in (tmp_path / "rejected").glob("*.fits")) == sorted(p.name for p in files["bad"])
 
     app._restore()
@@ -87,11 +121,10 @@ def test_gui_measure_adjust_move_restore(tmp_path: Path, root: tk.Tk, monkeypatc
     assert "已讀取上次的量測結果" in app.status_var.get()
 
 
-def test_gui_bad_threshold_input_is_ignored(tmp_path: Path, root: tk.Tk):
-    from astro_light_selector import gui
-
+def test_gui_bad_threshold_input_is_ignored(tmp_path: Path, make_app):
     make_session(tmp_path, n_good=3)
-    app = gui.App(root, str(tmp_path))
+    app = make_app(tmp_path)
+    root = app.root
     app.workers_var.set("1")
     app._start_measure()
     _pump(root, lambda: app.selection is not None and not app._busy())
@@ -104,13 +137,14 @@ def test_gui_bad_threshold_input_is_ignored(tmp_path: Path, root: tk.Tk):
     assert "門檻數字不合理" in app.status_var.get()
 
 
-def test_gui_switch_language_keeps_results(tmp_path: Path, root: tk.Tk, isolated_settings: Path):
+def test_gui_switch_language_keeps_results(tmp_path: Path, make_app, isolated_settings: Path):
     import json
 
-    from astro_light_selector import gui, i18n
+    from astro_light_selector import i18n
 
     files = make_session(tmp_path, n_good=5)
-    app = gui.App(root, str(tmp_path))
+    app = make_app(tmp_path)
+    root = app.root
     app.workers_var.set("1")
     app._start_measure()
     _pump(root, lambda: app.selection is not None and not app._busy())

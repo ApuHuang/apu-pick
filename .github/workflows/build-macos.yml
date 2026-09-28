@@ -24,6 +24,9 @@ jobs:
           - runner: macos-latest    # Apple Silicon（M 系列晶片）
           - runner: macos-15-intel  # Intel Mac（GitHub 提供到 2027 年 8 月）
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      PYTHONUNBUFFERED: "1"  # 輸出即時出現在記錄裡，卡住時才看得出卡在哪
     steps:
       - uses: actions/checkout@v4
 
@@ -34,10 +37,19 @@ jobs:
       - name: 安裝
         run: python -m pip install -e ".[exe]" pytest
 
-      - name: 測試
-        run: python -m pytest -q
+      - name: 測試（核心）
+        timeout-minutes: 15
+        # 單一測試超過 4 分鐘就印出每個執行緒卡在哪一行
+        run: python -m pytest -v --ignore=tests/test_gui.py -o faulthandler_timeout=240
+
+      # 視窗測試要用到雲端 Mac 的圖形環境；失敗會標示出來，但不擋住打包
+      - name: 測試（視窗）
+        timeout-minutes: 10
+        continue-on-error: true
+        run: python -m pytest -v tests/test_gui.py -o faulthandler_timeout=120
 
       - name: 打包並自動測試打包好的程式
+        timeout-minutes: 20
         run: python packaging/build_exe.py
 
       - uses: actions/upload-artifact@v4

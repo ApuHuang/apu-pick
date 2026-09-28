@@ -386,7 +386,7 @@ class App:
         root.bind_all("<Escape>", lambda _e: self.close_popover())
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._refresh_all()
-        root.after(100, self._poll)
+        self._poll_job: str | None = root.after(100, self._poll)
         if folder:
             self._set_folder(Path(folder))
 
@@ -880,7 +880,7 @@ class App:
                 self._handle(self.events.get_nowait())
         except queue.Empty:
             pass
-        self.root.after(100, self._poll)
+        self._poll_job = self.root.after(100, self._poll)
 
     @staticmethod
     def _progress_text(i: int, n: int, eta: float, name: str) -> str:
@@ -1105,7 +1105,24 @@ class App:
             if not messagebox.askyesno(APP_NAME, tr("gui.close.confirm")):
                 return
             self.cancel.set()
+        self.close()
         self.root.destroy()
+
+    def close(self) -> None:
+        """停掉計時器、解除全域綁定、清掉畫面；之後 root 可以直接關掉，或拿來開新的 App。"""
+        self.cancel.set()
+        for job in (self._poll_job, self._apply_job):
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except tk.TclError:
+                    pass
+        self._poll_job = self._apply_job = None
+        self.close_popover()
+        for sequence in ("<Control-o>", "<Button-1>", "<Escape>"):
+            self.root.unbind_all(sequence)
+        for child in self.root.winfo_children():
+            child.destroy()
 
 
 def _enable_dpi_awareness() -> None:
