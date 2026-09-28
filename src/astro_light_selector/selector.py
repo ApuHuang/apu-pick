@@ -39,6 +39,7 @@ class Decision:
     keep: bool
     reasons: list[str] = field(default_factory=list)
     score: float | None = None
+    group: str = ""
 
 
 def _mad(values: np.ndarray) -> float:
@@ -116,9 +117,17 @@ def select(frames: list[FrameMetrics], th: Thresholds) -> list[Decision]:
     return decisions
 
 
-def select_by_score(frames: list[FrameMetrics], cfg: ScoreConfig) -> tuple[list[Decision], ScoreResult]:
-    """綜合評分挑片：分數低於門檻 → reject；量不出來的一樣 reject。"""
-    result = score_frames(frames, cfg)
+def select_by_score(frames: list[FrameMetrics],
+                    cfg: ScoreConfig) -> tuple[list[Decision], ScoreResult | None]:
+    """綜合評分挑片：分數低於門檻 → reject；量不出來的一樣 reject。
+
+    整批沒有任何一張能量測時，全部 reject，result 為 None。
+    """
+    try:
+        result = score_frames(frames, cfg)
+    except ValueError:
+        return [Decision(f, keep=False, reasons=[f"error: {f.error}" if f.error else "無法評分"])
+                for f in frames], None
     decisions: list[Decision] = []
     for f in frames:
         if f.file not in result.scores:

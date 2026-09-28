@@ -12,7 +12,7 @@ from .selector import Decision
 COLUMNS = [
     "file", "keep", "score", "reasons", "n_stars", "fwhm", "eccentricity",
     "background", "noise", "snr", "saturated_frac",
-    "exposure", "filter", "date_obs", "error",
+    "exposure", "filter", "date_obs", "group", "error",
 ]
 FLOAT_COLUMNS = ("fwhm", "eccentricity", "background", "noise", "snr", "saturated_frac")
 
@@ -50,6 +50,7 @@ def write_csv(decisions: list[Decision], path: Path) -> None:
             row["keep"] = "keep" if d.keep else "reject"
             row["score"] = "" if d.score is None else f"{d.score:.1f}"
             row["reasons"] = "; ".join(d.reasons)
+            row["group"] = d.group
             for key in FLOAT_COLUMNS:
                 v = row[key]
                 row[key] = "" if v is None or v != v else f"{v:.4f}"
@@ -57,11 +58,17 @@ def write_csv(decisions: list[Decision], path: Path) -> None:
 
 
 def print_score_summary(result: ScoreResult) -> None:
-    ref = result.reference
-    print(f"\n範本（各指標前段平均）: FWHM {ref['fwhm']:.2f}  ecc {ref['eccentricity']:.2f}  "
-          f"stars {ref['n_stars']:.0f}  bkg {ref['background']:.0f}")
+    labels = {"fwhm": ("FWHM", ".2f"), "eccentricity": ("ecc", ".2f"),
+              "n_stars": ("stars", ".0f"), "background": ("bkg", ".0f")}
+    parts = [f"{labels[m][0]} {v:{labels[m][1]}}" for m, v in result.reference.items()]
+    print(f"\n範本（各指標前段平均）: {'  '.join(parts)}")
     print(f"分數眾數 {result.mode:.1f}，MAD {result.mad:.1f}，及格線 {result.pass_line:.0f}")
-    how = "被及格線頂住" if result.limited_by_pass_line else "由眾數決定"
+    how = {
+        "mode": "由眾數決定",
+        "pass_line": "被及格線頂住",
+        "min_score": "--min-score 指定",
+        "keep_best": f"--keep-best 只留前段 {sum(s >= result.threshold for s in result.scores.values())} 張",
+    }[result.method]
     print(f"keep 門檻 = {result.threshold:.1f}（{how}）")
 
 

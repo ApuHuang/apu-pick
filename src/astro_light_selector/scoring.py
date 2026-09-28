@@ -6,6 +6,9 @@
 3. 用 KDE 找分數分布的峰值（眾數），找不到就退回中位數。
 4. keep 門檻 = max(眾數 − margin_k × MAD, 100 × pass_pct)：
    平常由眾數決定；整批偏差、眾數掉到及格線以下時，由及格線頂住。
+   MAD 有下限 min_mad，避免整批很一致時門檻貼著眾數。
+5. 使用者也可以直接指定門檻，取代第 4 步：
+   min_score：分數低於此值就 reject；keep_best：只留分數最高的前幾成。
 """
 
 from __future__ import annotations
@@ -18,14 +21,21 @@ from scipy.stats import gaussian_kde
 from .metrics import FrameMetrics
 
 
+METRICS = ("fwhm", "eccentricity", "n_stars", "background")
+
+
 @dataclass
 class ScoreConfig:
     top_frac: float = 0.10     # 每個指標取最好的前幾 % 當範本
     pass_pct: float = 0.80     # 及格線：範本分數的百分比
     margin_k: float = 1.5      # 眾數往下容許幾個 MAD
+    # MAD 下限（分數點數）：整批品質很一致時 MAD 會縮到 0.x，不加下限會把只差零點幾分的正常片 reject
+    min_mad: float = 2.0
     weights: dict[str, float] = field(default_factory=lambda: {
         "fwhm": 0.35, "eccentricity": 0.30, "n_stars": 0.20, "background": 0.15,
     })
+    min_score: float | None = None   # 直接指定 keep 門檻（0~100）
+    keep_best: float | None = None   # 只留能評分的影像中分數最高的這個比例（0~1]
 
 
 @dataclass
@@ -37,7 +47,7 @@ class ScoreResult:
     mad: float
     threshold: float                  # keep 門檻
     pass_line: float                  # 及格線 = 100 × pass_pct
-    limited_by_pass_line: bool        # 門檻是否被及格線頂住
+    method: str                       # 門檻怎麼來的：mode / pass_line / min_score / keep_best
 
 
 def _top_mean(values: np.ndarray, frac: float, lower_is_better: bool) -> float:
@@ -90,13 +100,21 @@ def score_frames(frames: list[FrameMetrics], cfg: ScoreConfig) -> ScoreResult:
 
     arr = np.array(list(scores.values()))
     mode = _mode(arr)
-    mad = float(np.median(np.abs(arr - np.median(arr))) * 1.4826)
+    mad = max(float(np.median(np.abs(arr - np.median(arr))) * 1.4826), cfg.min_mad)
     pass_line = 100.0 * cfg.pass_pct
     by_mode = mode - cfg.margin_k * mad
-    threshold = max(by_mode, pass_line)
+    if cfg.min_score is not None:
+        threshold, method = cfg.min_score, "min_score"
+    elif cfg.keep_best is not None:
+        # 第 n 高的分數當門檻；同分的都會留下，所以可能比 n 張多一點
+        n = max(1, int(round(len(arr) * cfg.keep_best)))
+        threshold, method = float(np.sort(arr)[::-1][min(n, len(arr)) - 1]), "keep_best"
+    elif pass_line > by_mode:
+        threshold, method = pass_line, "pass_line"
+    else:
+        threshold, method = by_mode, "mode"
 
     return ScoreResult(
         scores=scores, components=components, reference=reference,
-        mode=mode, mad=mad, threshold=threshold, pass_line=pass_line,
-        limited_by_pass_line=pass_line > by_mode,
+        mode=mode, mad=mad, threshold=threshold, pass_line=pass_line, method=method,
     )

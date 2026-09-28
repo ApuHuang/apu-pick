@@ -7,13 +7,12 @@ import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-from .metrics import FrameMetrics, measure
-from .mover import move_rejected
+from .grouping import GROUP_KEYS, group_frames, parse_group_keys
+from .metrics import FITS_SUFFIXES, FrameMetrics, measure
+from .mover import moved_away, restore_rejected, sync_files
 from .report import print_score_summary, print_summary, read_csv, write_csv
-from .scoring import ScoreConfig
-from .selector import Thresholds, select, select_by_score
-
-FITS_SUFFIXES = {".fit", ".fits", ".fts"}
+from .scoring import METRICS, ScoreConfig
+from .selector import Decision, Thresholds, select, select_by_score
 
 
 def find_fits(folder: Path) -> list[Path]:
@@ -37,6 +36,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="不重新量測，直接讀之前的 CSV 報表重新套門檻（調參數用）")
     p.add_argument("--mode", choices=["score", "rules"], default="score",
                    help="score：以最佳範本評分（預設）；rules：各指標獨立門檻")
+    p.add_argument("--group-by", type=str, default="filter,exposure",
+                   help=f"依這些欄位分組、各組分開算門檻，逗號分隔（{', '.join(GROUP_KEYS)}），"
+                        "none 表示整批一起算（預設 filter,exposure）")
+    p.add_argument("--plot", nargs="?", type=Path, const=True, default=None,
+                   help="輸出指標趨勢圖 PNG（預設 <folder>/selection_plot.png，需要 matplotlib）")
+    p.add_argument("--restore", action="store_true",
+                   help="把 rejected 資料夾裡的檔案搬回原位後結束（可配合 --dry-run）")
 
     g = p.add_argument_group("評分模式（--mode score）")
     g.add_argument("--top-frac", type=float, default=0.10, help="每個指標取最好的前幾成當範本（預設 0.10）")
@@ -44,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--margin-k", type=float, default=1.5, help="眾數往下容許幾個 MAD（預設 1.5）")
     g.add_argument("--weights", type=str, default=None,
                    help="權重，例如 fwhm=0.35,eccentricity=0.3,n_stars=0.2,background=0.15")
+    direct = g.add_mutually_exclusive_group()
+    direct.add_argument("--min-score", type=float, default=None,
+                        help="直接指定門檻：分數低於此值就 reject（0~100，取代自動門檻）")
+    direct.add_argument("--keep-best", type=float, default=None,
+                        help="只留能評分的影像中分數最高的這個比例，例如 0.7 = 前 70%%（每組各自算）")
 
     g = p.add_argument_group("規則模式（--mode rules）相對門檻（中位數 ± k×MAD）")
     g.add_argument("-k", type=float, default=None, help="一次設定下面四個 k（越小越嚴）")
@@ -70,7 +81,15 @@ def _parse_weights(text: str | None) -> dict[str, float] | None:
     out: dict[str, float] = {}
     for item in text.split(","):
         key, _, val = item.partition("=")
-        out[key.strip()] = float(val)
+        key = key.strip()
+        if key not in METRICS:
+            raise ValueError(f"不支援的權重指標: {key}（可用 {', '.join(METRICS)}）")
+        try:
+            out[key] = float(val)
+        except ValueError:
+            raise ValueError(f"權重格式錯誤: {item!r}，應為 指標=數字") from None
+    if sum(out.values()) <= 0:
+        raise ValueError("權重總和必須大於 0")
     return out
 
 
@@ -98,59 +117,120 @@ def measure_all(files: list[Path], workers: int) -> list[FrameMetrics]:
     return frames
 
 
+def _build_thresholds(args: argparse.Namespace) -> Thresholds:
+    defaults = Thresholds()
+
+    def k_of(v: float | None, default: float) -> float:
+        if v is not None:
+            return v
+        return args.k if args.k is not None else default
+
+    return Thresholds(
+        fwhm_k=k_of(args.fwhm_k, defaults.fwhm_k),
+        stars_k=k_of(args.stars_k, defaults.stars_k),
+        ecc_k=k_of(args.ecc_k, defaults.ecc_k),
+        background_k=k_of(args.background_k, defaults.background_k),
+        max_fwhm=_opt(args.max_fwhm),
+        min_stars=None if args.min_stars < 0 else args.min_stars,
+        max_eccentricity=_opt(args.max_ecc),
+        max_saturated_frac=_opt(args.max_saturated),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     folder: Path = args.folder
     if not folder.is_dir():
         print(f"找不到資料夾: {folder}", file=sys.stderr)
         return 1
+    reject_dir = args.reject_dir or folder / "rejected"
 
-    files = find_fits(folder)
-    if not files:
-        print(f"{folder} 內沒有 FITS 檔案", file=sys.stderr)
-        return 1
+    if args.restore:
+        restored = restore_rejected(reject_dir, folder, dry_run=args.dry_run)
+        verb = "預計搬回" if args.dry_run else "已搬回"
+        print(f"{verb} {len(restored)} 張")
+        return 0
+
+    try:
+        group_keys = parse_group_keys(args.group_by)
+        weights = _parse_weights(args.weights)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.mode != "score" and (args.min_score is not None or args.keep_best is not None):
+        parser.error("--min-score / --keep-best 只能用在評分模式（--mode score）")
+    if args.min_score is not None and not 0 <= args.min_score <= 100:
+        parser.error("--min-score 要在 0~100 之間")
+    if args.keep_best is not None and not 0 < args.keep_best <= 1:
+        parser.error("--keep-best 要在 0~1 之間，例如 0.7")
 
     if args.from_report:
+        if not args.from_report.is_file():
+            print(f"找不到報表: {args.from_report}", file=sys.stderr)
+            return 1
         frames = read_csv(args.from_report, folder)
         print(f"從 {args.from_report} 讀入 {len(frames)} 張的量測結果")
     else:
-        print(f"分析 {len(files)} 張影像...")
+        # 之前被搬去 reject 的也要算進同一批：門檻是相對整批算的，只看留下來的會越挑越嚴
+        away = moved_away(reject_dir, folder)
+        home_of = {str(cur): str(home) for home, cur in away.items()}
+        files = sorted(find_fits(folder) + list(away.values()),
+                       key=lambda p: Path(home_of.get(str(p), p)).name)
+        if not files:
+            print(f"{folder} 內沒有 FITS 檔案", file=sys.stderr)
+            return 1
+        extra = f"（含之前 reject 的 {len(away)} 張）" if away else ""
+        print(f"分析 {len(files)} 張影像{extra}...")
         frames = measure_all(files, args.workers)
+        # 用原位置當檔名，報表跟搬回原位才對得上
+        for m in frames:
+            m.file = home_of.get(m.file, m.file)
 
-    if args.mode == "score":
-        cfg = ScoreConfig(top_frac=args.top_frac, pass_pct=args.pass_pct, margin_k=args.margin_k)
-        if w := _parse_weights(args.weights):
-            cfg.weights = w
-        decisions, result = select_by_score(frames, cfg)
-        print_score_summary(result)
-    else:
-        defaults = Thresholds()
+    cfg = ScoreConfig(top_frac=args.top_frac, pass_pct=args.pass_pct, margin_k=args.margin_k,
+                      min_score=args.min_score, keep_best=args.keep_best)
+    if weights:
+        cfg.weights = weights
+    th = _build_thresholds(args)
 
-        def k_of(v: float | None, default: float) -> float:
-            if v is not None:
-                return v
-            return args.k if args.k is not None else default
-
-        th = Thresholds(
-            fwhm_k=k_of(args.fwhm_k, defaults.fwhm_k),
-            stars_k=k_of(args.stars_k, defaults.stars_k),
-            ecc_k=k_of(args.ecc_k, defaults.ecc_k),
-            background_k=k_of(args.background_k, defaults.background_k),
-            max_fwhm=_opt(args.max_fwhm),
-            min_stars=None if args.min_stars < 0 else args.min_stars,
-            max_eccentricity=_opt(args.max_ecc),
-            max_saturated_frac=_opt(args.max_saturated),
-        )
-        decisions = select(frames, th)
+    groups = group_frames(frames, group_keys)
+    by_file: dict[str, Decision] = {}
+    score_thresholds: dict[str, float] = {}
+    for label, members in groups.items():
+        if len(groups) > 1:
+            print(f"\n== {label}（{len(members)} 張）==")
+        if args.mode == "score":
+            group_decisions, result = select_by_score(members, cfg)
+            if result is None:
+                print("這組沒有任何一張能量測，全部 reject")
+            else:
+                print_score_summary(result)
+                score_thresholds[label] = result.threshold
+        else:
+            group_decisions = select(members, th)
+        for d in group_decisions:
+            d.group = label
+            by_file[d.metrics.file] = d
+    decisions = [by_file[f.file] for f in frames]
 
     report = args.report or folder / "selection_report.csv"
     write_csv(decisions, report)
     print_summary(decisions)
     print(f"\n報表: {report}")
 
-    reject_dir = args.reject_dir or folder / "rejected"
-    moved = move_rejected(decisions, reject_dir, dry_run=args.dry_run)
-    if moved:
+    if args.plot:
+        plot_path = folder / "selection_plot.png" if args.plot is True else args.plot
+        try:
+            from .plot import plot_decisions
+            plot_decisions(decisions, plot_path, score_thresholds)
+            print(f"趨勢圖: {plot_path}")
+        except ImportError:
+            print("畫圖需要 matplotlib：pip install matplotlib", file=sys.stderr)
+
+    moved_out, moved_back = sync_files(decisions, reject_dir, dry_run=args.dry_run)
+    if moved_out:
         verb = "預計搬移" if args.dry_run else "已搬移"
-        print(f"{verb} {len(moved)} 張到 {reject_dir}")
+        print(f"{verb} {len(moved_out)} 張到 {reject_dir}")
+    if moved_back:
+        verb = "預計搬回" if args.dry_run else "已搬回"
+        print(f"{verb} {len(moved_back)} 張這次變成 keep 的到原位")
     return 0

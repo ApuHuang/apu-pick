@@ -11,6 +11,8 @@ from astropy.stats import sigma_clipped_stats
 from scipy.optimize import least_squares
 from photutils.detection import IRAFStarFinder
 
+FITS_SUFFIXES = {".fit", ".fits", ".fts"}
+
 # 星點偵測門檻（背景雜訊的倍數）
 DETECT_SIGMA = 5.0
 # 偵測時假設的 FWHM（像素），只影響偵測核，不影響量測結果
