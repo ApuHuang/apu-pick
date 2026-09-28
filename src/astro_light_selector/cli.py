@@ -4,19 +4,15 @@ from __future__ import annotations
 
 import argparse
 import sys
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-from .grouping import GROUP_KEYS, group_frames, parse_group_keys
-from .metrics import FITS_SUFFIXES, FrameMetrics, measure
-from .mover import moved_away, restore_rejected, sync_files
+from .grouping import GROUP_KEYS, parse_group_keys
+from .metrics import FrameMetrics
+from .mover import restore_rejected, sync_files
+from .pipeline import REJECT_DIR_NAME, REPORT_NAME, collect_files, decide, measure_files
 from .report import print_score_summary, print_summary, read_csv, write_csv
 from .scoring import METRICS, ScoreConfig
-from .selector import Decision, Thresholds, select, select_by_score
-
-
-def find_fits(folder: Path) -> list[Path]:
-    return sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in FITS_SUFFIXES)
+from .selector import Thresholds
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -102,21 +98,6 @@ def _progress(i: int, n: int, m: FrameMetrics) -> None:
               f"ecc={m.eccentricity:.2f} bkg={m.background:.0f}")
 
 
-def measure_all(files: list[Path], workers: int) -> list[FrameMetrics]:
-    frames: list[FrameMetrics] = []
-    if workers > 1:
-        with ProcessPoolExecutor(max_workers=workers) as ex:
-            for i, m in enumerate(ex.map(measure, files), 1):
-                _progress(i, len(files), m)
-                frames.append(m)
-    else:
-        for i, f in enumerate(files, 1):
-            m = measure(f)
-            _progress(i, len(files), m)
-            frames.append(m)
-    return frames
-
-
 def _build_thresholds(args: argparse.Namespace) -> Thresholds:
     defaults = Thresholds()
 
@@ -144,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     if not folder.is_dir():
         print(f"找不到資料夾: {folder}", file=sys.stderr)
         return 1
-    reject_dir = args.reject_dir or folder / "rejected"
+    reject_dir = args.reject_dir or folder / REJECT_DIR_NAME
 
     if args.restore:
         restored = restore_rejected(reject_dir, folder, dry_run=args.dry_run)
@@ -171,20 +152,13 @@ def main(argv: list[str] | None = None) -> int:
         frames = read_csv(args.from_report, folder)
         print(f"從 {args.from_report} 讀入 {len(frames)} 張的量測結果")
     else:
-        # 之前被搬去 reject 的也要算進同一批：門檻是相對整批算的，只看留下來的會越挑越嚴
-        away = moved_away(reject_dir, folder)
-        home_of = {str(cur): str(home) for home, cur in away.items()}
-        files = sorted(find_fits(folder) + list(away.values()),
-                       key=lambda p: Path(home_of.get(str(p), p)).name)
+        files, home_of = collect_files(folder, reject_dir)
         if not files:
             print(f"{folder} 內沒有 FITS 檔案", file=sys.stderr)
             return 1
-        extra = f"（含之前 reject 的 {len(away)} 張）" if away else ""
+        extra = f"（含之前 reject 的 {len(home_of)} 張）" if home_of else ""
         print(f"分析 {len(files)} 張影像{extra}...")
-        frames = measure_all(files, args.workers)
-        # 用原位置當檔名，報表跟搬回原位才對得上
-        for m in frames:
-            m.file = home_of.get(m.file, m.file)
+        frames = measure_files(files, args.workers, progress=_progress, home_of=home_of)
 
     cfg = ScoreConfig(top_frac=args.top_frac, pass_pct=args.pass_pct, margin_k=args.margin_k,
                       min_score=args.min_score, keep_best=args.keep_best)
@@ -192,27 +166,19 @@ def main(argv: list[str] | None = None) -> int:
         cfg.weights = weights
     th = _build_thresholds(args)
 
-    groups = group_frames(frames, group_keys)
-    by_file: dict[str, Decision] = {}
-    score_thresholds: dict[str, float] = {}
-    for label, members in groups.items():
-        if len(groups) > 1:
-            print(f"\n== {label}（{len(members)} 張）==")
+    sel = decide(frames, group_keys, args.mode, cfg, th)
+    for label, size in sel.group_sizes.items():
+        if len(sel.group_sizes) > 1:
+            print(f"\n== {label}（{size} 張）==")
         if args.mode == "score":
-            group_decisions, result = select_by_score(members, cfg)
+            result = sel.results[label]
             if result is None:
                 print("這組沒有任何一張能量測，全部 reject")
             else:
                 print_score_summary(result)
-                score_thresholds[label] = result.threshold
-        else:
-            group_decisions = select(members, th)
-        for d in group_decisions:
-            d.group = label
-            by_file[d.metrics.file] = d
-    decisions = [by_file[f.file] for f in frames]
+    decisions = sel.decisions
 
-    report = args.report or folder / "selection_report.csv"
+    report = args.report or folder / REPORT_NAME
     write_csv(decisions, report)
     print_summary(decisions)
     print(f"\n報表: {report}")
@@ -221,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
         plot_path = folder / "selection_plot.png" if args.plot is True else args.plot
         try:
             from .plot import plot_decisions
-            plot_decisions(decisions, plot_path, score_thresholds)
+            plot_decisions(decisions, plot_path, sel.thresholds)
             print(f"趨勢圖: {plot_path}")
         except ImportError:
             print("畫圖需要 matplotlib：pip install matplotlib", file=sys.stderr)

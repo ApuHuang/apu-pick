@@ -5,6 +5,35 @@
 掃描資料夾中的 FITS light frames，對每張量測品質指標，依門檻自動分類為
 keep / reject，輸出 CSV 報表，並把 reject 的檔案搬到另一個資料夾。
 
+有視窗版（Windows 執行檔，不用裝 Python）跟命令列版兩種用法。
+
+## 視窗版
+
+把 `AstroLightSelector-<版本>-win64.zip` 解壓縮，執行裡面的 `AstroLightSelector.exe`
+（整個資料夾要一起留著，exe 不能單獨拿出來）。也可以把 light 資料夾直接拖到 exe 上開啟。
+
+1. **瀏覽…** 選放 light frames 的資料夾
+2. **開始量測**：量每張的 FWHM / 離心率 / 星點數 / 背景，幾百張要幾分鐘，可以隨時按停止。
+   量完結果會存成資料夾裡的 `selection_report.csv`，下次打開同一個資料夾會自動讀取，不用重量
+3. **調門檻**：自動 / 最低分數 / 只留最好的 X%，也可以勾選分組方式。改了趨勢圖跟清單會立刻更新
+4. **搬移 reject…**：確認後把 reject 搬到 Reject 資料夾；門檻放寬後再按一次，變成 keep 的會搬回來
+5. **全部還原…**：把 Reject 資料夾裡的檔案全部搬回原位
+
+疊圖軟體如果會連子資料夾一起掃（例如 WBPP 的「+ Directory」），把 Reject 資料夾改到
+light 資料夾外面，才不會把 reject 的也疊進去。
+
+從原始碼執行視窗版：`python -m astro_light_selector.gui`（需要 matplotlib）。
+
+### 自己打包 exe
+
+```bash
+pip install -e .[exe]
+python packaging/build_exe.py
+```
+
+產出 `dist\AstroLightSelector\AstroLightSelector.exe` 和分享用的 zip。打包完會自動用合成星場跑一次 exe，
+確認量測（含多核心）與畫圖正常。圖示由 `packaging/make_icon.py` 產生。
+
 ## 量測的指標
 
 | 指標 | 說明 |
@@ -56,7 +85,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## 使用方式
+## 命令列版使用方式
 
 ```bash
 # 先用 dry-run 看結果，不搬檔案
@@ -156,7 +185,11 @@ astro-light-selector/
 │   ├── report.py      # CSV 報表與摘要輸出
 │   ├── mover.py       # 搬移 / 還原 reject 檔案
 │   ├── plot.py        # 趨勢圖
-│   └── cli.py         # 命令列介面
+│   ├── pipeline.py    # 量測 → 分組 → 挑片流程（命令列、視窗共用）
+│   ├── cli.py         # 命令列介面
+│   ├── gui.py         # 視窗介面
+│   └── assets/        # 程式圖示
+├── packaging/         # 打包 exe：build_exe.py、進入點、圖示產生
 ├── tests/
 ├── samples/           # 測試用 FITS（不進 git）
 └── requirements.txt

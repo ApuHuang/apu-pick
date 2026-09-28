@@ -57,19 +57,27 @@ def write_csv(decisions: list[Decision], path: Path) -> None:
             writer.writerow(row)
 
 
-def print_score_summary(result: ScoreResult) -> None:
+def score_summary_lines(result: ScoreResult) -> list[str]:
     labels = {"fwhm": ("FWHM", ".2f"), "eccentricity": ("ecc", ".2f"),
               "n_stars": ("stars", ".0f"), "background": ("bkg", ".0f")}
     parts = [f"{labels[m][0]} {v:{labels[m][1]}}" for m, v in result.reference.items()]
-    print(f"\n範本（各指標前段平均）: {'  '.join(parts)}")
-    print(f"分數眾數 {result.mode:.1f}，MAD {result.mad:.1f}，及格線 {result.pass_line:.0f}")
     how = {
         "mode": "由眾數決定",
         "pass_line": "被及格線頂住",
-        "min_score": "--min-score 指定",
-        "keep_best": f"--keep-best 只留前段 {sum(s >= result.threshold for s in result.scores.values())} 張",
+        "min_score": "指定最低分數",
+        "keep_best": f"只留前段 {sum(s >= result.threshold for s in result.scores.values())} 張",
     }[result.method]
-    print(f"keep 門檻 = {result.threshold:.1f}（{how}）")
+    return [
+        f"範本（各指標前段平均）: {'  '.join(parts)}",
+        f"分數眾數 {result.mode:.1f}，MAD {result.mad:.1f}，及格線 {result.pass_line:.0f}",
+        f"keep 門檻 = {result.threshold:.1f}（{how}）",
+    ]
+
+
+def print_score_summary(result: ScoreResult) -> None:
+    print()
+    for line in score_summary_lines(result):
+        print(line)
 
 
 def print_summary(decisions: list[Decision]) -> None:

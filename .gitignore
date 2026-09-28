@@ -9,3 +9,5 @@ output/
 *.xisf
 *.egg-info/
 .pytest_cache/
+build/
+dist/
