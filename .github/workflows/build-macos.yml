@@ -28,9 +28,9 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"  # 輸出即時出現在記錄裡，卡住時才看得出卡在哪
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -52,7 +52,7 @@ jobs:
         timeout-minutes: 20
         run: python packaging/build_exe.py
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: APUPick-${{ matrix.runner }}
           path: dist/*.zip
