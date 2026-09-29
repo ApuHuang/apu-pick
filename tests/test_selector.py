@@ -323,4 +323,139 @@ def test_old_report_error_text_is_understood(tmp_path: Path):
         "exposure,filter,date_obs,error\n"
         "a.fit,reject,,,671,,,1500,20,5,0,300.0,,2026-09-06T01:25:27,"
         "只有 5 顆星能擬合，可能被雲遮住或只剩熱像素\n", encoding="utf-8-sig")
-    assert read_csv(report, tmp_path)[0].error == "few_fit_stars:5"
+    old = read_csv(report, tmp_path)[0]
+    assert old.error == "few_fit_stars:5"
+    assert old.altitude is None  # 舊報表沒有拍攝資訊欄位
+
+
+def test_exposure_tolerance_merges_bulb_timing():
+    from astro_light_selector.grouping import exposure_buckets, group_frames
+    from astro_light_selector.metrics import FrameMetrics
+
+    def fm(name: str, exp: float) -> FrameMetrics:
+        return FrameMetrics(name, 100, 3.0, 0.2, 800, 10, 20, 0, exp, None, None)
+
+    frames = [fm("a", 301.0), fm("b", 302.0), fm("c", 301.0), fm("d", 60.0), fm("e", 120.0)]
+    assert exposure_buckets(frames, 2) == {60.0: "60s", 120.0: "120s", 301.0: "301~302s", 302.0: "301~302s"}
+    groups = group_frames(frames, ("exposure",), 2)
+    assert sorted(len(v) for v in groups.values()) == [1, 1, 3]
+    # 誤差設 0：301 和 302 分開
+    assert len(group_frames(frames, ("exposure",), 0)) == 4
+
+
+def test_raw_bayer_and_xtrans_are_measured(monkeypatch, tmp_path: Path):
+    """用合成星場假裝成相機 RAW（2×2 Bayer 和 6×6 X-Trans），確認整個量測流程走得通。"""
+    import datetime
+    from types import SimpleNamespace
+
+    import numpy as np
+    import rawpy
+
+    field = make_star_field(shape=(600, 600), fwhm=4.0, n_stars=200, background=600, seed=3).astype(np.float32)
+
+    def fake_raw(pattern: np.ndarray, desc: bytes):
+        tiles = (field.shape[0] // pattern.shape[0], field.shape[1] // pattern.shape[1])
+        colors = np.tile(pattern, tiles)
+        raw = SimpleNamespace(
+            raw_image_visible=(field[:colors.shape[0], :colors.shape[1]] + 512).astype(np.uint16),
+            raw_colors_visible=colors, raw_pattern=pattern, color_desc=desc,
+            black_level_per_channel=[512, 512, 512, 512], white_level=16383,
+            other=SimpleNamespace(shutter_speed=300.0, iso_speed=800.0,
+                                  timestamp=datetime.datetime(2026, 9, 5, 21, 0, 0)),
+        )
+        raw.__enter__ = lambda self=raw: raw
+        return raw
+
+    class Ctx:
+        def __init__(self, raw):
+            self.raw = raw
+
+        def __enter__(self):
+            return self.raw
+
+        def __exit__(self, *exc):
+            return False
+
+    bayer = np.array([[0, 1], [3, 2]])
+    xtrans = np.array([[1, 1, 0, 1, 1, 2], [1, 1, 2, 1, 1, 0], [2, 0, 1, 0, 2, 1],
+                       [1, 1, 2, 1, 1, 0], [1, 1, 0, 1, 1, 2], [0, 2, 1, 2, 0, 1]])
+    for name, pattern, desc in (("a.CR2", bayer, b"RGBG"), ("b.RAF", xtrans, b"RGBG")):
+        monkeypatch.setattr(rawpy, "imread", lambda _p, r=fake_raw(pattern, desc): Ctx(r))
+        path = tmp_path / name
+        path.write_bytes(b"x")
+        m = measure(path)
+        assert m.error is None, m.error
+        assert 3.2 <= m.fwhm <= 4.8, m.fwhm
+        assert m.exposure == 300.0 and m.date_obs == "2026-09-05T21:00:00"
+
+
+def test_cli_respects_manual_overrides(tmp_path: Path):
+    import csv
+
+    files = make_session(tmp_path)
+    assert main([str(tmp_path), "--dry-run"]) == 0
+    report = tmp_path / "selection_report.csv"
+    rows = list(csv.DictReader(report.open(encoding="utf-8-sig", newline="")))
+    bad = files["bad"][0].name
+    for r in rows:
+        if r["file"] == bad:
+            r["override"] = "keep"
+    with report.open("w", encoding="utf-8-sig", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=rows[0].keys())
+        w.writeheader()
+        w.writerows(rows)
+
+    # 視窗版標成手動保留的，命令列重跑（不論重新量測或讀報表）也要照樣保留
+    for extra in (["--from-report", str(report)], []):
+        assert main([str(tmp_path), "--dry-run", *extra]) == 0
+        again = {r["file"]: r for r in csv.DictReader(report.open(encoding="utf-8-sig", newline=""))}
+        assert again[bad]["keep"] == "keep" and again[bad]["override"] == "keep"
+
+
+def test_sky_info_from_header():
+    from astropy.io import fits
+
+    from astro_light_selector.sky import sky_info
+
+    def header(**cards):
+        h = fits.Header()
+        h["SITELAT"], h["SITELONG"], h["EXPTIME"] = 23.5, 120.5, 300.0
+        for k, v in cards.items():
+            h[k] = v
+        return h
+
+    # 北天極的仰角 = 當地緯度；2024-09-18 是滿月、2024-10-02 是新月
+    full = sky_info(header(RA=0.0, DEC=89.9999, **{"DATE-OBS": "2024-09-18T02:34:00"}))
+    assert abs(full.altitude - 23.5) < 0.3
+    assert full.moon_illum > 0.97
+    assert 0 <= full.moon_sep <= 180
+    # 六十進位字串（OBJCTRA 是時角）也讀得懂
+    new = sky_info(header(OBJCTRA="00 00 00", OBJCTDEC="+89 59 59", **{"DATE-OBS": "2024-10-02T18:49:00"}))
+    assert abs(new.altitude - 23.5) < 0.3
+    assert new.moon_illum < 0.03
+    # 缺地點（例如相機 RAW）就不算
+    assert sky_info(fits.Header({"RA": 10.0, "DEC": 20.0, "DATE-OBS": "2024-10-02T18:49:00"})) is None
+
+
+def test_sky_info_is_measured_saved_and_plotted(tmp_path: Path):
+    pytest.importorskip("matplotlib")
+    from matplotlib.figure import Figure
+
+    from astro_light_selector.plot import draw_decisions
+    from astro_light_selector.report import read_csv, write_csv
+
+    site = dict(sitelat=23.5, sitelong=120.5, ra=0.0, dec=89.9999)
+    paths = [write_fits(tmp_path / f"s{i}.fits", make_star_field(fwhm=3.0, n_stars=150, seed=i),
+                        date_obs=f"2024-09-18T1{i}:00:00", **site) for i in range(3)]
+    frames = [measure(p) for p in paths]
+    assert all(abs(m.altitude - 23.5) < 0.3 and m.moon_illum is not None for m in frames)
+
+    decisions = select(frames, Thresholds())
+    report = tmp_path / "report.csv"
+    write_csv(decisions, report)
+    again = read_csv(report, tmp_path)
+    assert [m.altitude for m in again] == pytest.approx([m.altitude for m in frames], abs=1e-3)
+
+    fig = Figure()
+    draw_decisions(fig, decisions, dark=True)
+    assert any(ax.get_ylabel().startswith(("仰角", "Altitude")) for ax in fig.axes)

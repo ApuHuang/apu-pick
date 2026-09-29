@@ -11,10 +11,19 @@ APU Pick 的進階說明：給想用命令列、調更多參數，或自己改�
 | `eccentricity` | 星點離心率中位數，0 = 正圓，越大越拖線 |
 | `background` | 背景亮度中位數（ADU），雲 / 月光 / 光害會拉高 |
 | `noise` | 背景雜訊標準差 |
-| `snr` | 星點峰值 / 背景雜訊 |
+| `snr` | 量 FWHM 用的那些亮星：峰值 / 背景雜訊 的中位數（薄雲、天亮會明顯下降） |
 | `saturated_frac` | 飽和像素比例 |
+| `altitude` | 目標仰角（度），曝光中間點 |
+| `moon_alt` / `moon_sep` / `moon_illum` | 月亮仰角、月亮離目標的角距離（度）、月相（被照亮的比例 0~1） |
 
-OSC（Bayer）影像會先做 2x2 super-pixel 再偵測，FWHM 會換算回原始像素尺度。
+OSC（Bayer）影像會先做 2x2 super-pixel 再偵測，Fuji X-Trans 做 3x3，FWHM 會換算回原始像素尺度。
+單眼 RAW 用 rawpy（LibRaw）讀原始 CFA 資料並扣掉黑位，快門、ISO、拍攝時間從 EXIF 讀。
+
+熱像素不算星點：3x3 範圍內中心那格佔了 70% 以上亮度的偵測結果視為熱像素，不算進星點數、也不拿來量星形。
+
+仰角與月亮要 header 有目標座標（`RA`/`DEC`、`OBJCTRA`/`OBJCTDEC` 或 WCS 的 `CRVAL1`/`CRVAL2`）、
+地點（`SITELAT`/`SITELONG`）和 UTC 的 `DATE-OBS`，用 astropy 內建星曆計算，不需要連網；缺任何一項就留空。
+這幾個只是參考資訊，不影響評分。
 
 ## 挑片邏輯
 
@@ -23,7 +32,7 @@ OSC（Bayer）影像會先做 2x2 super-pixel 再偵測，FWHM 會換算回原�
 1. 讀不到、偵測不到星、能擬合的星 < 10 顆（被雲遮住）→ 直接淘汰
 2. 每個指標各取整批最好的前 10% 平均，組成「最佳範本」
 3. 每張影像每個指標換算成相對範本的比例（範本 = 1，上限 1），加權後 × 100 = 分數
-   - FWHM 35%、離心率 30%、星點數 20%、背景 15%
+   - 建議權重：FWHM 35%、離心率 30%、星點數 20%、背景 15%、SNR 0%（`--weights` 或視窗的「評分權重」可改）
 4. 用 KDE 找分數分布的峰值（眾數）
 5. 保留門檻 = max(眾數 − 1.5 × MAD, 100 × 80%)
    - 平常由眾數決定；整批偏差、眾數掉到及格線以下時，由及格線頂住
@@ -41,6 +50,8 @@ OSC（Bayer）影像會先做 2x2 super-pixel 再偵測，FWHM 會換算回原�
 
 多晚的資料可以加上 `night`（`--group-by filter,exposure,night`），每晚各自比較。
 「一晚」是依 DATE-OBS 相鄰兩張間隔超過 4 小時切開的，跨過午夜也算同一晚。
+
+單眼 B 快門的曝光時間常差一兩秒（301、302 秒），`--exposure-tolerance`（預設 2 秒）範圍內算同一組。
 
 也可以用 `--mode rules`（只有命令列版）：四個指標各自獨立門檻（中位數 ± k × MAD 加上絕對上下限），
 任何一項不合格就淘汰。
@@ -92,6 +103,9 @@ python -m astro_light_selector D:\astro\M31\lights --restore
 報表 `selection_report.csv` 的欄位名稱和 `keep` 欄的值（keep / reject）是給程式讀的資料格式，
 維持英文；`reasons` 欄的淘汰原因會用產生報表時的介面語言。
 
+`override` 欄是視窗版「強制保留／強制淘汰」的紀錄（keep / reject，空白 = 自動）。
+命令列重跑時也會照這一欄，不會被新的門檻蓋掉；想取消就把那格清空。
+
 ### 搬檔與重跑
 
 - 只搬淘汰的，保留的不動；同名檔案不覆蓋，自動改名 `_1`、`_2`…
@@ -117,13 +131,14 @@ python -m astro_light_selector D:\astro\M31\lights --restore
 | `--from-report CSV` | | 不重新量測，讀舊報表重套門檻 |
 | `--mode` | score | `score` 評分模式 / `rules` 規則模式 |
 | `--group-by` | `filter,exposure` | 分組欄位（`filter` / `exposure` / `night`），`none` 表示整批一起算 |
+| `--exposure-tolerance` | 2 | 曝光時間差在幾秒以內算同一組 |
 | `--plot [PNG]` | | 輸出趨勢圖（預設 `<folder>/selection_plot.png`） |
 | `--restore` | | 把淘汰片資料夾的檔案搬回原位後結束 |
 | **評分模式** | | |
 | `--top-frac` | 0.10 | 每個指標取最好的前幾成當範本 |
 | `--pass-pct` | 0.80 | 及格線 = 範本分數 × 此值 |
 | `--margin-k` | 1.5 | 眾數往下容許幾個 MAD |
-| `--weights` | | 例如 `fwhm=0.35,eccentricity=0.3,n_stars=0.2,background=0.15` |
+| `--weights` | | 例如 `fwhm=0.35,eccentricity=0.3,n_stars=0.2,background=0.15,snr=0` |
 | `--min-score` | | 直接指定門檻（0~100），取代自動門檻 |
 | `--keep-best` | | 只留分數最高的這個比例（0~1），取代自動門檻 |
 | **規則模式** | | |
@@ -154,7 +169,7 @@ PyInstaller 不能跨平台打包，Mac 版要在 Mac 上打包：發布 Release
 自動打包並附到 Release 上（`.github/workflows/build-macos.yml`），也可以在 Actions 頁面手動執行。
 
 圖示和 Logo 由 `packaging/make_assets.py` 產生。介面文字（繁體中文 / English）都在
-`src/astro_light_selector/i18n.py`，介面語言設定存在系統的應用程式設定資料夾
+`src/astro_light_selector/i18n.py`，介面語言、面板收合、權重等設定存在系統的應用程式設定資料夾
 （Windows：`%APPDATA%\APU Pick\settings.json`）。
 
 ## 測試
@@ -175,6 +190,9 @@ PyInstaller 不能跨平台打包，Mac 版要在 Mac 上打包：發布 Release
 apu-pick/
 ├── src/astro_light_selector/
 │   ├── metrics.py     # 單張影像的品質量測
+│   ├── rawfile.py     # 單眼 RAW 讀取
+│   ├── sky.py         # 目標仰角、月亮（從 header 算）
+│   ├── preview.py     # 預覽縮圖（自動拉伸）
 │   ├── scoring.py     # 最佳範本評分
 │   ├── grouping.py    # 依濾鏡 / 曝光 / 夜晚分組
 │   ├── selector.py    # 保留 / 淘汰判斷
@@ -185,7 +203,7 @@ apu-pick/
 │   ├── cli.py         # 命令列介面
 │   ├── gui.py         # 視窗介面
 │   ├── i18n.py        # 介面文字（繁體中文 / English）
-│   ├── settings.py    # 使用者設定（介面語言）
+│   ├── settings.py    # 使用者設定（介面語言、權重…）
 │   └── assets/        # 程式圖示
 ├── packaging/         # 打包：build_exe.py、進入點、圖示與 Logo 產生
 ├── docs/              # 進階說明、截圖、Logo

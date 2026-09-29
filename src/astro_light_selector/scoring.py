@@ -21,7 +21,9 @@ from scipy.stats import gaussian_kde
 from .metrics import FrameMetrics
 
 
-METRICS = ("fwhm", "eccentricity", "n_stars", "background")
+METRICS = ("fwhm", "eccentricity", "n_stars", "background", "snr")
+# 建議權重：用 NGC7635 對照肉眼挑片調出來的。SNR 預設 0（0.4 新增，不改變原本的結果），使用者可自己打開
+DEFAULT_WEIGHTS = {"fwhm": 0.35, "eccentricity": 0.30, "n_stars": 0.20, "background": 0.15, "snr": 0.0}
 
 
 @dataclass
@@ -31,9 +33,7 @@ class ScoreConfig:
     margin_k: float = 1.5      # 眾數往下容許幾個 MAD
     # MAD 下限（分數點數）：整批品質很一致時 MAD 會縮到 0.x，不加下限會把只差零點幾分的正常片 reject
     min_mad: float = 2.0
-    weights: dict[str, float] = field(default_factory=lambda: {
-        "fwhm": 0.35, "eccentricity": 0.30, "n_stars": 0.20, "background": 0.15,
-    })
+    weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
     min_score: float | None = None   # 直接指定 keep 門檻（0~100）
     keep_best: float | None = None   # 只留能評分的影像中分數最高的這個比例（0~1]
 
@@ -63,7 +63,7 @@ def _ratio(metric: str, value: float, ref: float) -> float:
         r = ref / value if value > 0 else 0.0
     elif metric == "eccentricity":
         r = (1.0 - value) / (1.0 - ref) if ref < 1.0 else 0.0
-    elif metric == "n_stars":
+    elif metric in ("n_stars", "snr"):
         r = value / ref if ref > 0 else 0.0
     else:
         raise KeyError(metric)
@@ -86,7 +86,7 @@ def score_frames(frames: list[FrameMetrics], cfg: ScoreConfig) -> ScoreResult:
     if not ok:
         raise ValueError("沒有任何一張能量測，無法評分")
 
-    lower_is_better = {"fwhm": True, "eccentricity": True, "n_stars": False, "background": True}
+    lower_is_better = {"fwhm": True, "eccentricity": True, "n_stars": False, "background": True, "snr": False}
     columns = {m: np.array([getattr(f, m) for f in ok], dtype=float) for m in cfg.weights}
     reference = {m: _top_mean(columns[m], cfg.top_frac, lower_is_better[m]) for m in cfg.weights}
 

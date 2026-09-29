@@ -60,6 +60,7 @@ class Decision:
     reasons: list[Reason] = field(default_factory=list)
     score: float | None = None
     group: str = ""
+    override: str | None = None   # 使用者手動覆寫："keep" / "reject"；None = 照自動判斷
 
 
 def _mad(values: np.ndarray) -> float:
@@ -156,7 +157,9 @@ def select_by_score(frames: list[FrameMetrics],
         sc = result.scores[f.file]
         if sc < result.threshold:
             comp = result.components[f.file]
-            worst = min(comp, key=comp.get)
+            # 權重為 0 的指標不算分，也不該被當成弱項
+            weighted = {m: r for m, r in comp.items() if cfg.weights.get(m, 0) > 0} or comp
+            worst = min(weighted, key=weighted.get)
             reasons = [Reason("score_low", {"score": sc, "threshold": result.threshold,
                                             "metric": worst, "ratio": comp[worst]})]
         else:

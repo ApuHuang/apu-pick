@@ -56,6 +56,8 @@ def build() -> Path:
         "--paths", str(ROOT / "src"),
         "--add-data", f"{ASSETS}{os.pathsep}astro_light_selector/assets",
         "--collect-submodules", "photutils",
+        "--collect-all", "rawpy",  # 相機 RAW：rawpy 內含 LibRaw 的動態函式庫
+        "--collect-data", "astropy_iers_data",  # 算仰角用的地球自轉資料（不連網）
         "--copy-metadata", "photutils",
         "--distpath", str(DIST),
         "--workpath", str(BUILD),

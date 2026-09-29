@@ -6,7 +6,7 @@ import csv
 import shutil
 from pathlib import Path
 
-from .metrics import FITS_SUFFIXES
+from .metrics import IMAGE_SUFFIXES
 from .selector import Decision
 
 # 記錄程式搬了哪些檔案（原位置 -> 目前位置）。重跑時靠它把之前 reject 的也算進同一批、
@@ -115,7 +115,7 @@ def restore_rejected(reject_dir: Path, folder: Path, dry_run: bool = False) -> l
     logged = set(log.values())
     if reject_dir.is_dir():
         for p in sorted(reject_dir.iterdir()):
-            if p.is_file() and p.suffix.lower() in FITS_SUFFIXES and p.resolve() not in logged:
+            if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES and p.resolve() not in logged:
                 pairs.append((p, folder / p.name))
 
     restored: list[Path] = []

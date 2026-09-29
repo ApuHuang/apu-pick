@@ -72,6 +72,7 @@ _ZH: dict[str, str] = {
     "metric.eccentricity": "離心率",
     "metric.n_stars": "星點數",
     "metric.background": "背景",
+    "metric.snr": "SNR",
 
     "error.read_failed": "讀取失敗：{detail}",
     "error.blank": "背景雜訊為 0，可能是空白影像",
@@ -79,6 +80,8 @@ _ZH: dict[str, str] = {
     "error.few_fit_stars": "只有 {detail} 顆星能擬合，可能被雲遮住或只剩熱像素",
 
     "reason.unscorable": "無法評分",
+    "reason.manual_keep": "手動保留",
+    "reason.manual_reject": "手動淘汰",
     "reason.score_low": "分數 {score:.1f} < {threshold:.1f}（弱項：{metric} {ratio:.2f}）",
     "reason.fwhm_high": "FWHM {value:.2f} > {limit:.2f}",
     "reason.fwhm_max": "FWHM {value:.2f} > 上限 {limit}",
@@ -114,6 +117,11 @@ _ZH: dict[str, str] = {
     "plot.eccentricity": "離心率",
     "plot.n_stars": "星點數",
     "plot.background": "背景 (ADU)",
+    "plot.snr": "SNR",
+    "plot.altitude": "仰角 (°)",
+    "plot.target": "目標",
+    "plot.moon": "月亮",
+    "plot.moon_phase": "月相 {p:.0f}%",
     "plot.title": "共 {n} 張：保留 {keep}，淘汰 {reject}",
     "plot.xlabel": "拍攝順序",
     "plot.placeholder": "量測完成後，這裡會顯示各指標的趨勢圖",
@@ -155,16 +163,36 @@ _ZH: dict[str, str] = {
     "gui.slider.min_score": "最低分數",
     "gui.slider.keep_best": "保留比例",
     "gui.value.points": "{v:.0f} 分",
+    "gui.group.weights": "評分權重",
+    "gui.group.weights.info": "每個指標在總分裡佔多少。滑桿是相對比例，右邊會換算成百分比；設成 0 就不看這一項。\n"
+                              "建議權重（FWHM 35%、離心率 30%、星點數 20%、背景 15%）是對照肉眼挑片調出來的。\n"
+                              "SNR 是亮星的訊噪比，薄雲、背景變亮都會讓它下降；預設 0（不計分），需要時再打開。\n"
+                              "改了權重，分數分布和自動門檻都會跟著變。",
+    "gui.weights.recommended": "建議權重",
+    "gui.weights.custom": "自訂權重",
+    "gui.btn.reset_weights": "恢復建議值",
+    "gui.status.no_weights": "權重不能全部是 0",
+    "summary.weights": "權重：{parts}",
     "gui.group.grouping": "分組",
     "gui.group.grouping.info": "每組各自算範本和門檻。不同濾鏡、曝光時間的背景和星點數差很多，混在一起算，"
-                               "整組窄頻或短曝光的片會全部被淘汰。多晚的資料可以開「每晚分開」，每晚各自比較。",
+                               "整組窄頻或短曝光的片會全部被淘汰。多晚的資料可以開「每晚分開」，每晚各自比較。"
+                               "單眼的 B 快門計時常有一兩秒誤差（例如 301、302 秒），曝光差在「曝光誤差容許」以內的算同一組。",
     "gui.toggle.filter": "依濾鏡分開",
     "gui.toggle.exposure": "依曝光時間分開",
     "gui.toggle.night": "每晚分開",
+    "gui.slider.exposure_tolerance": "曝光誤差容許",
+    "gui.value.seconds": "{v:.0f} 秒",
     "gui.group.measure": "量測",
     "gui.group.measure.info": "平行處理數越大越快，但也越吃記憶體，電腦變卡就調低。"
-                              "量完的結果會存成資料夾裡的 selection_report.csv，下次開同一個資料夾會自動讀取。",
+                              "量完的結果會存成資料夾裡的 selection_report.csv，下次開同一個資料夾會自動讀取。\n\n"
+                              "監看資料夾：拍攝時打開，每 10 秒檢查一次，新檔案寫完就自動量測、加進結果，"
+                              "門檻跟著整批重算。只量測不搬檔，搬檔還是要自己按。",
     "gui.slider.workers": "平行處理數",
+    "gui.toggle.watch": "監看資料夾",
+    "gui.status.watching": "監看中：共 {n} 張，有新檔案會自動量測",
+    "gui.status.watch_measuring": "監看中：量測 {n} 張新檔案…",
+    "gui.status.watch_added": "監看中：新增 {n} 張，最新是 {name}，共 {total} 張",
+    "gui.status.watch_off": "已停止監看資料夾",
     "gui.group.rejects": "淘汰片",
     "gui.group.rejects.info": "淘汰的片只會搬到這個資料夾，不會刪除；按「全部還原」就會搬回原位。\n"
                               "用 PixInsight WBPP 的「+ Directory」加入整個 light 資料夾時，子資料夾也會被加進去，"
@@ -174,6 +202,18 @@ _ZH: dict[str, str] = {
     "gui.tab.list": "清單",
     "gui.tab.details": "門檻細節",
     "gui.only_reject": "只看淘汰片",
+    "gui.btn.force_keep": "強制保留",
+    "gui.btn.force_reject": "強制淘汰",
+    "gui.btn.clear_override": "改回自動",
+    "gui.override.help": "選取清單裡的片（Ctrl / Shift 可多選）再按這裡，或在清單上按右鍵；手動決定會一直保留，重新量測或調門檻都不會改掉",
+    "gui.metric.manual": "手動覆寫",
+    "gui.preview.hint": "點清單裡的一張片，這裡會顯示預覽",
+    "gui.preview.loading": "載入中…",
+    "gui.preview.failed": "無法預覽：{error}",
+    "gui.preview.missing": "找不到這個檔案",
+    "gui.preview.closeup": "放大 ×2（點縮圖換位置）",
+    "gui.preview.sky_moon_up": "目標仰角 {alt:.0f}°｜月亮仰角 {moon:.0f}°，照亮 {illum:.0f}%，離目標 {sep:.0f}°",
+    "gui.preview.sky_moon_down": "目標仰角 {alt:.0f}°｜月亮在地平線下（照亮 {illum:.0f}%）",
     "gui.col.file": "檔名",
     "gui.col.result": "結果",
     "gui.col.score": "分數",
@@ -181,6 +221,9 @@ _ZH: dict[str, str] = {
     "gui.col.ecc": "離心率",
     "gui.col.stars": "星點數",
     "gui.col.bkg": "背景",
+    "gui.col.snr": "SNR",
+    "gui.col.alt": "仰角",
+    "gui.col.moon": "月亮仰角",
     "gui.col.group": "分組",
     "gui.col.reason": "原因",
     "gui.pick_folder": "選擇放 light frames 的資料夾",
@@ -234,6 +277,7 @@ _EN: dict[str, str] = {
     "metric.eccentricity": "eccentricity",
     "metric.n_stars": "star count",
     "metric.background": "background",
+    "metric.snr": "SNR",
 
     "error.read_failed": "Could not read file: {detail}",
     "error.blank": "Background noise is zero, possibly a blank image",
@@ -241,6 +285,8 @@ _EN: dict[str, str] = {
     "error.few_fit_stars": "Only {detail} stars could be fitted, probably clouds or only hot pixels",
 
     "reason.unscorable": "Could not be scored",
+    "reason.manual_keep": "Kept manually",
+    "reason.manual_reject": "Rejected manually",
     "reason.score_low": "Score {score:.1f} < {threshold:.1f} (weakest: {metric} {ratio:.2f})",
     "reason.fwhm_high": "FWHM {value:.2f} > {limit:.2f}",
     "reason.fwhm_max": "FWHM {value:.2f} > max {limit}",
@@ -276,6 +322,11 @@ _EN: dict[str, str] = {
     "plot.eccentricity": "Eccentricity",
     "plot.n_stars": "Stars",
     "plot.background": "Background (ADU)",
+    "plot.snr": "SNR",
+    "plot.altitude": "Altitude (°)",
+    "plot.target": "Target",
+    "plot.moon": "Moon",
+    "plot.moon_phase": "Moon {p:.0f}%",
     "plot.title": "{n} frames: {keep} kept, {reject} rejected",
     "plot.xlabel": "Capture order",
     "plot.placeholder": "Trend charts appear here after measuring",
@@ -319,17 +370,43 @@ _EN: dict[str, str] = {
     "gui.slider.min_score": "Minimum Score",
     "gui.slider.keep_best": "Keep Ratio",
     "gui.value.points": "{v:.0f}",
+    "gui.group.weights": "Score Weights",
+    "gui.group.weights.info": "How much each metric counts toward the score. Sliders are relative; the right side shows "
+                              "the resulting share. Set one to 0 to ignore it.\n"
+                              "The recommended weights (FWHM 35%, eccentricity 30%, stars 20%, background 15%) were "
+                              "tuned against hand-picked frames.\n"
+                              "SNR is the signal-to-noise of the bright stars; thin cloud or a brighter sky lowers it. "
+                              "It defaults to 0 (not scored); turn it up if you need it.\n"
+                              "Changing weights also changes the score distribution and the auto threshold.",
+    "gui.weights.recommended": "Recommended",
+    "gui.weights.custom": "Custom",
+    "gui.btn.reset_weights": "Restore Recommended",
+    "gui.status.no_weights": "Weights can't all be 0",
+    "summary.weights": "Weights: {parts}",
     "gui.group.grouping": "Grouping",
     "gui.group.grouping.info": "Each group gets its own reference and threshold. Different filters and exposures differ "
                                "a lot in background and star count; scored together, a whole narrowband or short-exposure "
-                               "set would be rejected. For several nights, turn on By Night to compare each night separately.",
+                               "set would be rejected. For several nights, turn on By Night to compare each night separately. "
+                               "Camera bulb timing is often off by a second or two (301 s vs 302 s); exposures within "
+                               "Exposure Tolerance of each other count as one group.",
     "gui.toggle.filter": "By Filter",
     "gui.toggle.exposure": "By Exposure",
     "gui.toggle.night": "By Night",
+    "gui.slider.exposure_tolerance": "Exposure Tolerance",
+    "gui.value.seconds": "{v:.0f} s",
     "gui.group.measure": "Measurement",
     "gui.group.measure.info": "More parallel workers is faster but uses more memory; lower it if the computer slows down. "
-                              "Results are saved as selection_report.csv in the folder and load automatically next time.",
+                              "Results are saved as selection_report.csv in the folder and load automatically next time.\n\n"
+                              "Watch Folder: turn it on while shooting. The folder is checked every 10 seconds; "
+                              "new files are measured once they finish writing and added to the results, "
+                              "and thresholds are recalculated for the whole set. It only measures; "
+                              "moving files is still up to you.",
     "gui.slider.workers": "Parallel Workers",
+    "gui.toggle.watch": "Watch Folder",
+    "gui.status.watching": "Watching: {n} frames. New files will be measured automatically.",
+    "gui.status.watch_measuring": "Watching: measuring {n} new files…",
+    "gui.status.watch_added": "Watching: added {n}, latest {name}, {total} frames in total",
+    "gui.status.watch_off": "Stopped watching the folder",
     "gui.group.rejects": "Rejected Frames",
     "gui.group.rejects.info": "Rejected frames are only moved to this folder, never deleted; Restore All puts them back.\n"
                               "PixInsight WBPP's “+ Directory” also adds subfolders of the light folder, "
@@ -339,6 +416,19 @@ _EN: dict[str, str] = {
     "gui.tab.list": "Frames",
     "gui.tab.details": "Threshold Details",
     "gui.only_reject": "Rejects Only",
+    "gui.btn.force_keep": "Force Keep",
+    "gui.btn.force_reject": "Force Reject",
+    "gui.btn.clear_override": "Back to Auto",
+    "gui.override.help": "Select frames in the list (Ctrl / Shift for several), then click here or right-click the list. "
+                         "Manual choices stick through re-measuring and threshold changes.",
+    "gui.metric.manual": "Manual overrides",
+    "gui.preview.hint": "Select a frame in the list to preview it",
+    "gui.preview.loading": "Loading…",
+    "gui.preview.failed": "Can't preview: {error}",
+    "gui.preview.missing": "File not found",
+    "gui.preview.closeup": "Close-up ×2 (click the thumbnail to move)",
+    "gui.preview.sky_moon_up": "Target altitude {alt:.0f}° | Moon {moon:.0f}° up, {illum:.0f}% lit, {sep:.0f}° away",
+    "gui.preview.sky_moon_down": "Target altitude {alt:.0f}° | Moon below horizon ({illum:.0f}% lit)",
     "gui.col.file": "File",
     "gui.col.result": "Result",
     "gui.col.score": "Score",
@@ -346,6 +436,9 @@ _EN: dict[str, str] = {
     "gui.col.ecc": "Eccentricity",
     "gui.col.stars": "Stars",
     "gui.col.bkg": "Background",
+    "gui.col.snr": "SNR",
+    "gui.col.alt": "Altitude",
+    "gui.col.moon": "Moon Alt",
     "gui.col.group": "Group",
     "gui.col.reason": "Reason",
     "gui.pick_folder": "Choose the folder with your light frames",

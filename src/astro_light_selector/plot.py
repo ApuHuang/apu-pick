@@ -16,7 +16,7 @@ from .i18n import tr
 from .selector import Decision
 
 # 各格要畫的指標，標題用 tr(f"plot.{key}")
-PANELS = ["score", "fwhm", "eccentricity", "n_stars", "background"]
+PANELS = ["score", "fwhm", "eccentricity", "n_stars", "background", "snr", "altitude"]
 
 LIGHT = {
     "bg": "white", "axes": "white", "text": "#1a1a1a", "muted": "gray", "spine": "#555555",
@@ -53,6 +53,33 @@ def _robust_limits(y: np.ndarray) -> tuple[float, float] | None:
     return lo, hi
 
 
+def _draw_altitude(ax, ordered: list[Decision], x: np.ndarray, keep: np.ndarray, theme: dict) -> None:
+    """目標仰角（保留 / 淘汰分色）加上月亮仰角（只畫在地平線上的時候），月相變了就標一次。"""
+    alt = np.array([np.nan if d.metrics.altitude is None else d.metrics.altitude for d in ordered])
+    moon = np.array([np.nan if d.metrics.moon_alt is None else d.metrics.moon_alt for d in ordered])
+    ax.scatter(x[keep], alt[keep], s=10, c=theme["keep"], label=tr("plot.target"))
+    ax.scatter(x[~keep], alt[~keep], s=14, c=theme["reject"], marker="x")
+    up = moon > 0
+    if up.any():
+        ax.scatter(x[up], moon[up], s=6, c=theme["muted"], label=tr("plot.moon"))
+    # 月相一晚只差一點點，換晚（差 5% 以上）才再標
+    shown = None
+    for i, d in enumerate(ordered):
+        p = d.metrics.moon_illum
+        if p is None or (shown is not None and abs(p - shown) < 0.05):
+            continue
+        shown = p
+        ax.annotate(tr("plot.moon_phase", p=p * 100), (i, 1), xycoords=("data", "axes fraction"),
+                    xytext=(3, -3), textcoords="offset points", va="top", fontsize=7, color=theme["muted"])
+    ax.set_ylim(min(0.0, float(np.nanmin(alt)) - 5), 90)
+    ax.set_ylabel(tr("plot.altitude"), color=theme["text"])
+    ax.grid(color=theme["grid"], linewidth=0.8)
+    ax.set_axisbelow(True)
+    legend = ax.legend(loc="lower left", fontsize=8, facecolor=theme["legend"], edgecolor=theme["spine"])
+    for text in legend.get_texts():
+        text.set_color(theme["text"])
+
+
 def draw_decisions(fig: Figure, decisions: list[Decision], thresholds: dict[str, float] | None = None,
                    dark: bool = False) -> None:
     """清掉 fig 重畫：依分組、DATE-OBS 排序的多格圖。
@@ -69,7 +96,9 @@ def draw_decisions(fig: Figure, decisions: list[Decision], thresholds: dict[str,
     x = np.arange(len(ordered))
     keep = np.array([d.keep for d in ordered])
     colors = np.where(keep, theme["keep"], theme["reject"])
-    panels = [p for p in PANELS if p != "score" or any(d.score is not None for d in ordered)]
+    panels = [p for p in PANELS
+              if (p != "score" or any(d.score is not None for d in ordered))
+              and (p != "altitude" or any(d.metrics.altitude is not None for d in ordered))]
 
     axes = np.atleast_1d(fig.subplots(len(panels), 1, sharex=True))
     for ax, key in zip(axes, panels):
@@ -77,6 +106,9 @@ def draw_decisions(fig: Figure, decisions: list[Decision], thresholds: dict[str,
         for spine in ax.spines.values():
             spine.set_color(theme["spine"])
         ax.tick_params(colors=theme["muted"], labelcolor=theme["muted"])
+        if key == "altitude":
+            _draw_altitude(ax, ordered, x, keep, theme)
+            continue
         y = np.array([_value(d, key) for d in ordered])
         lim = _robust_limits(y)
         if lim is not None:

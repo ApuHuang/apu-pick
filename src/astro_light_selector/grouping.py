@@ -57,7 +57,32 @@ def _fmt_exposure(v: float | None) -> str:
     return f"{v:g}s"
 
 
-def group_frames(frames: list[FrameMetrics], keys: tuple[str, ...]) -> dict[str, list[FrameMetrics]]:
+# 曝光時間差在幾秒以內算同一組：單眼 B 快門計時常有一兩秒誤差（例如 301、302 秒）
+EXPOSURE_TOLERANCE = 2.0
+
+
+def exposure_buckets(frames: list[FrameMetrics], tolerance: float = EXPOSURE_TOLERANCE) -> dict[float, str]:
+    """把曝光時間分群：由小到大排，跟這群第一個值相差在 tolerance 秒以內的歸同一群。
+
+    回傳 {曝光秒數: 標籤}；群裡只有一種秒數顯示「300s」，混了幾種顯示「301~302s」。
+    """
+    values = sorted({f.exposure for f in frames if f.exposure is not None})
+    clusters: list[list[float]] = []
+    for v in values:
+        if clusters and v - clusters[-1][0] <= tolerance:
+            clusters[-1].append(v)
+        else:
+            clusters.append([v])
+    labels = {}
+    for c in clusters:
+        label = _fmt_exposure(c[0]) if len(c) == 1 else f"{c[0]:g}~{c[-1]:g}s"
+        for v in c:
+            labels[v] = label
+    return labels
+
+
+def group_frames(frames: list[FrameMetrics], keys: tuple[str, ...],
+                 exposure_tolerance: float = EXPOSURE_TOLERANCE) -> dict[str, list[FrameMetrics]]:
     """回傳 {分組標籤: 影像清單}，保留原本順序。keys 為空時整批一組（標籤為空字串）。
 
     標籤用目前的介面語言組成，例如「濾鏡 L／曝光 300s」。
@@ -65,6 +90,7 @@ def group_frames(frames: list[FrameMetrics], keys: tuple[str, ...]) -> dict[str,
     if not keys:
         return {"": list(frames)}
     nights = assign_nights(frames) if "night" in keys else {}
+    exposures = exposure_buckets(frames, exposure_tolerance) if "exposure" in keys else {}
     groups: dict[str, list[FrameMetrics]] = {}
     for f in frames:
         parts = []
@@ -72,7 +98,7 @@ def group_frames(frames: list[FrameMetrics], keys: tuple[str, ...]) -> dict[str,
             if k == "filter":
                 parts.append(tr("group.filter", value=f.filter) if f.filter else tr("group.no_filter"))
             elif k == "exposure":
-                parts.append(tr("group.exposure", value=_fmt_exposure(f.exposure)))
+                parts.append(tr("group.exposure", value=exposures.get(f.exposure, _fmt_exposure(f.exposure))))
             else:
                 parts.append(tr("group.night", value=nights.get(f.file, "?")))
         groups.setdefault(tr("group.sep").join(parts), []).append(f)

@@ -8,11 +8,11 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
-from .grouping import group_frames
-from .metrics import FITS_SUFFIXES, FrameMetrics, measure
+from .grouping import EXPOSURE_TOLERANCE, group_frames
+from .metrics import IMAGE_SUFFIXES, FrameMetrics, measure
 from .mover import moved_away
 from .scoring import ScoreConfig, ScoreResult
-from .selector import Decision, Thresholds, select, select_by_score
+from .selector import Decision, Reason, Thresholds, select, select_by_score
 
 REPORT_NAME = "selection_report.csv"
 REJECT_DIR_NAME = "rejected"
@@ -25,7 +25,7 @@ class Cancelled(Exception):
 
 
 def find_fits(folder: Path) -> list[Path]:
-    return sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in FITS_SUFFIXES)
+    return sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES)
 
 
 def collect_files(folder: Path, reject_dir: Path) -> tuple[list[Path], dict[str, str]]:
@@ -58,7 +58,8 @@ def measure_files(files: list[Path], workers: int = 1, progress: ProgressFn | No
         if progress is not None:
             progress(count, n, m)
 
-    if workers > 1 and n > 1:
+    # 只有一張也放到子行程量：視窗監看時一次常只進來一張，在視窗的行程裡量會讓介面卡住
+    if workers > 1:
         ex = ProcessPoolExecutor(max_workers=min(workers, n))
         try:
             futures = {ex.submit(measure, f): i for i, f in enumerate(files)}
@@ -92,11 +93,17 @@ class Selection:
 
 
 def decide(frames: list[FrameMetrics], group_keys: tuple[str, ...], mode: str = "score",
-           cfg: ScoreConfig | None = None, th: Thresholds | None = None) -> Selection:
-    """分組後各組分開挑片，decisions 照 frames 的順序。"""
+           cfg: ScoreConfig | None = None, th: Thresholds | None = None,
+           exposure_tolerance: float = EXPOSURE_TOLERANCE,
+           overrides: dict[str, str] | None = None) -> Selection:
+    """分組後各組分開挑片，decisions 照 frames 的順序。曝光差 exposure_tolerance 秒以內算同一組。
+
+    overrides：{檔名: "keep" / "reject"}，使用者手動覆寫。覆寫的片照使用者決定，原因欄保留自動判斷；
+    自動門檻仍用整批（含覆寫的片）計算，覆寫只改最後的結果。
+    """
     cfg = cfg or ScoreConfig()
     th = th or Thresholds()
-    groups = group_frames(frames, group_keys)
+    groups = group_frames(frames, group_keys, exposure_tolerance)
     by_file: dict[str, Decision] = {}
     results: dict[str, ScoreResult | None] = {}
     for label, members in groups.items():
@@ -107,6 +114,12 @@ def decide(frames: list[FrameMetrics], group_keys: tuple[str, ...], mode: str = 
         for d in group_decisions:
             d.group = label
             by_file[d.metrics.file] = d
+    for d in by_file.values():
+        choice = (overrides or {}).get(Path(d.metrics.file).name)
+        if choice in ("keep", "reject"):
+            d.override = choice
+            d.keep = choice == "keep"
+            d.reasons = [Reason(f"manual_{choice}"), *d.reasons]
     return Selection(
         decisions=[by_file[f.file] for f in frames],
         group_sizes={label: len(members) for label, members in groups.items()},

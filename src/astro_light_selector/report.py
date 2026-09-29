@@ -13,9 +13,11 @@ from .selector import Decision
 COLUMNS = [
     "file", "keep", "score", "reasons", "n_stars", "fwhm", "eccentricity",
     "background", "noise", "snr", "saturated_frac",
-    "exposure", "filter", "date_obs", "group", "error",
+    "exposure", "filter", "date_obs", "group", "error", "override",
+    "altitude", "moon_alt", "moon_sep", "moon_illum",
 ]
-FLOAT_COLUMNS = ("fwhm", "eccentricity", "background", "noise", "snr", "saturated_frac")
+FLOAT_COLUMNS = ("fwhm", "eccentricity", "background", "noise", "snr", "saturated_frac",
+                 "altitude", "moon_alt", "moon_sep", "moon_illum")
 
 
 def read_csv(path: Path, folder: Path) -> list[FrameMetrics]:
@@ -35,8 +37,20 @@ def read_csv(path: Path, folder: Path) -> list[FrameMetrics]:
                 filter=row["filter"] or None,
                 date_obs=row["date_obs"] or None,
                 error=normalize_error(row["error"]) if row["error"] else None,
+                # 0.4 以後的欄位；舊報表沒有就是 None
+                **{k: float(row[k]) if row.get(k) else None
+                   for k in ("altitude", "moon_alt", "moon_sep", "moon_illum")},
             ))
     return frames
+
+
+def read_overrides(path: Path) -> dict[str, str]:
+    """讀報表裡使用者的手動覆寫：{檔名: "keep" / "reject"}；沒有報表或舊版報表沒有這欄就是空的。"""
+    if not path.is_file():
+        return {}
+    with path.open(newline="", encoding="utf-8-sig") as fh:
+        return {row["file"]: row["override"] for row in csv.DictReader(fh)
+                if row.get("override") in ("keep", "reject")}
 
 
 def write_csv(decisions: list[Decision], path: Path) -> None:
@@ -52,6 +66,7 @@ def write_csv(decisions: list[Decision], path: Path) -> None:
             row["score"] = "" if d.score is None else f"{d.score:.1f}"
             row["reasons"] = "; ".join(str(r) for r in d.reasons)
             row["group"] = d.group
+            row["override"] = d.override or ""
             for key in FLOAT_COLUMNS:
                 v = row[key]
                 row[key] = "" if v is None or v != v else f"{v:.4f}"
@@ -60,7 +75,7 @@ def write_csv(decisions: list[Decision], path: Path) -> None:
 
 def score_summary_lines(result: ScoreResult) -> list[str]:
     """評分結果的說明（範本、眾數、門檻怎麼來的），用目前的介面語言。"""
-    digits = {"fwhm": ".2f", "eccentricity": ".2f", "n_stars": ".0f", "background": ".0f"}
+    digits = {"fwhm": ".2f", "eccentricity": ".2f", "n_stars": ".0f", "background": ".0f", "snr": ".1f"}
     parts = [f"{tr_metric(m)} {v:{digits[m]}}" for m, v in result.reference.items()]
     if result.method == "keep_best":
         how = tr("summary.how.keep_best", n=sum(s >= result.threshold for s in result.scores.values()))

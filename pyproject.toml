@@ -5,7 +5,7 @@ description = "APU Pick (Astrophotography Pick Utility)：天文攝影 light fra
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
-dependencies = ["astropy>=6.0", "numpy>=1.26", "photutils>=1.12", "scipy>=1.12"]
+dependencies = ["astropy>=6.0", "numpy>=1.26", "photutils>=1.12", "scipy>=1.12", "rawpy>=0.25", "exifread>=3.0"]
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.8"]

@@ -14,22 +14,26 @@ import threading
 import time
 import tkinter as tk
 import traceback
+from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, font, messagebox, ttk
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
+from PIL import ImageTk
 
 from . import __version__
-from .i18n import APP_NAME, APP_SUBTITLE, LANGUAGES, get_language, set_language, tr
-from .metrics import FITS_SUFFIXES, FrameMetrics
-from .mover import restore_rejected, sync_files
+from .grouping import EXPOSURE_TOLERANCE
+from .i18n import APP_NAME, APP_SUBTITLE, LANGUAGES, get_language, set_language, tr, tr_metric
+from .metrics import IMAGE_SUFFIXES, FrameMetrics
+from .mover import read_move_log, restore_rejected, sync_files
 from .pipeline import (REJECT_DIR_NAME, REPORT_NAME, Cancelled, Selection, collect_files, decide,
                        measure_files)
 from .plot import DARK, draw_decisions
-from .report import read_csv, score_summary_lines, write_csv
-from .scoring import ScoreConfig
+from .preview import Preview, closeup, make_preview, thumbnail
+from .report import read_csv, read_overrides, score_summary_lines, write_csv
+from .scoring import DEFAULT_WEIGHTS, METRICS, ScoreConfig
 from .settings import load_settings, save_settings
 
 ASSETS = Path(__file__).parent / "assets"
@@ -71,6 +75,9 @@ COLUMNS = [
     ("ecc", "gui.col.ecc", 80, "e"),
     ("stars", "gui.col.stars", 60, "e"),
     ("bkg", "gui.col.bkg", 80, "e"),
+    ("snr", "gui.col.snr", 55, "e"),
+    ("alt", "gui.col.alt", 55, "e"),
+    ("moon", "gui.col.moon", 75, "e"),
     ("group", "gui.col.group", 170, "w"),
     ("reason", "gui.col.reason", 360, "w"),
 ]
@@ -359,13 +366,30 @@ class App:
         self.group_filter_var = tk.BooleanVar(value=True)
         self.group_exposure_var = tk.BooleanVar(value=True)
         self.group_night_var = tk.BooleanVar(value=False)
+        self.exposure_tol_var = tk.DoubleVar(value=float(load_settings().get("exposure_tolerance", EXPOSURE_TOLERANCE)))
         self.workers_var = tk.IntVar(value=default_workers())
+        # 監看資料夾：拍攝時定時檢查，新檔案寫完就量測；每次開資料夾都從關閉開始
+        self.watch_var = tk.BooleanVar(value=False)
+        self._watch_job: str | None = None
+        self._watch_sizes: dict[str, int] = {}
         self.only_reject_var = tk.BooleanVar(value=False)
+        # 使用者在清單上手動覆寫的結果：{檔名: "keep" / "reject"}，存在報表的 override 欄
+        self.overrides: dict[str, str] = {}
+        # 預覽：最近看過的幾張留在記憶體，上下鍵切換比較快
+        self._previews: OrderedDict[str, Preview] = OrderedDict()
+        self._preview_name: str | None = None
+        self._preview_center = (0.5, 0.5)
+        self._preview_job: str | None = None
         self.folder_var = tk.StringVar()
         self.reject_var = tk.StringVar()
         self.status_var = tk.StringVar()
         self.summary_var = tk.StringVar()
-        self.panel_state: dict[str, bool] = dict(load_settings().get("panel", {}))
+        settings = load_settings()
+        self.panel_state: dict[str, bool] = dict(settings.get("panel", {}))
+        # 權重滑桿存 0~100 的相對值；上次自訂過就沿用
+        saved = settings.get("weights") or {}
+        self.weight_vars = {m: tk.DoubleVar(value=float(saved.get(m, DEFAULT_WEIGHTS[m] * 100)))
+                            for m in METRICS}
 
         self._scale = root.winfo_fpixels("1i") / 96.0
         self.fonts = Fonts(root)
@@ -376,14 +400,19 @@ class App:
         self._setup_style()
         self._build()
         for var in (self.method_var, self.pass_var, self.min_score_var, self.keep_best_var,
-                    self.group_filter_var, self.group_exposure_var, self.group_night_var):
+                    self.group_filter_var, self.group_exposure_var, self.group_night_var,
+                    self.exposure_tol_var, *self.weight_vars.values()):
             var.trace_add("write", lambda *_: self._schedule_apply())
+        for var in self.weight_vars.values():
+            var.trace_add("write", lambda *_: self._update_weight_view())
         self.only_reject_var.trace_add("write", lambda *_: self._fill_table())
+        self.watch_var.trace_add("write", lambda *_: self._toggle_watch())
         # 延到事件處理完再換：換語言會重建介面，包含正在處理點擊的那個切換鈕
         self.lang_var.trace_add("write", lambda *_: root.after_idle(self._change_language))
         root.bind_all("<Control-o>", lambda _e: self._browse_folder())
         root.bind_all("<Button-1>", self._maybe_close_popover, add="+")
         root.bind_all("<Escape>", lambda _e: self.close_popover())
+        root.bind_all("<MouseWheel>", self._scroll_panel, add="+")
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._refresh_all()
         self._poll_job: str | None = root.after(100, self._poll)
@@ -513,13 +542,33 @@ class App:
 
     def _build_panel(self, body: tk.Frame) -> None:
         D = Darkroom
-        panel = tk.Frame(body, bg=D.panel, width=self.px(D.panel_width))
-        panel.pack(side="right", fill="y")
-        panel.pack_propagate(False)
+        outer = tk.Frame(body, bg=D.panel, width=self.px(D.panel_width))
+        outer.pack(side="right", fill="y")
+        outer.pack_propagate(False)
+        # 分組一多，矮螢幕放不下：內容放在可捲動的 Canvas 裡，超出高度才出現捲軸
+        canvas = tk.Canvas(outer, bg=D.panel, highlightthickness=0, bd=0)
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview, style="Dark.Vertical.TScrollbar")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        panel = tk.Frame(canvas, bg=D.panel)
+        window = canvas.create_window((0, 0), window=panel, anchor="nw")
+        self.panel_canvas = canvas
+
+        def relayout(_event: object = None) -> None:
+            canvas.itemconfigure(window, width=canvas.winfo_width())
+            canvas.configure(scrollregion=(0, 0, 0, panel.winfo_reqheight()))
+            if panel.winfo_reqheight() > canvas.winfo_height() > 1:
+                scrollbar.pack(side="right", fill="y", before=canvas)
+            else:
+                scrollbar.pack_forget()
+                canvas.yview_moveto(0)
+
+        panel.bind("<Configure>", relayout)
+        canvas.bind("<Configure>", relayout)
 
         group = PanelGroup(panel, self, "result", tr("gui.group.result"), tr("gui.group.result.info"))
         self.metrics = {key: MetricRow(group.body, self, tr(f"gui.metric.{key}"))
-                        for key in ("frames", "kept", "rejected", "threshold", "ref_fwhm")}
+                        for key in ("frames", "kept", "rejected", "manual", "threshold", "ref_fwhm")}
 
         group = PanelGroup(panel, self, "threshold", tr("gui.group.threshold"), tr("gui.group.threshold.info"))
         Segmented(group.body, self, [("auto", tr("gui.method.auto")), ("min_score", tr("gui.method.min_score")),
@@ -534,14 +583,35 @@ class App:
                                          10, 100, lambda v: f"{v:.0f}%"),
         }
 
+        group = PanelGroup(panel, self, "weights", tr("gui.group.weights"), tr("gui.group.weights.info"))
+        row = tk.Frame(group.body, bg=D.panel)
+        row.pack(fill="x", pady=(0, self.px(6)))
+        self.weight_badge = tk.Label(row, font=self.fonts.small, bg=D.panel)
+        self.weight_badge.pack(side="left")
+        self.reset_weights_btn = ttk.Button(row, text=tr("gui.btn.reset_weights"), style="Dark.TButton",
+                                            command=self._reset_weights)
+        self.reset_weights_btn.pack(side="right")
+        # 右邊顯示換算後的百分比；四個滑桿互相影響，所以由 _update_weight_view 一起更新
+        self.weight_sliders = {
+            m: ParameterSlider(group.body, self, tr(key), self.weight_vars[m], 0, 100,
+                               lambda _v, m=m: self._weight_share_text(m))
+            for m, key in (("fwhm", "gui.col.fwhm"), ("eccentricity", "gui.col.ecc"),
+                           ("n_stars", "gui.col.stars"), ("background", "gui.col.bkg"), ("snr", "gui.col.snr"))
+        }
+        for slider in self.weight_sliders.values():
+            slider.pack(fill="x", pady=(0, self.px(4)))
+
         group = PanelGroup(panel, self, "grouping", tr("gui.group.grouping"), tr("gui.group.grouping.info"))
         for key, var in (("filter", self.group_filter_var), ("exposure", self.group_exposure_var),
                          ("night", self.group_night_var)):
             ParameterToggle(group.body, self, tr(f"gui.toggle.{key}"), var).pack(fill="x", pady=self.px(2))
+        ParameterSlider(group.body, self, tr("gui.slider.exposure_tolerance"), self.exposure_tol_var, 0, 30,
+                        lambda v: tr("gui.value.seconds", v=v)).pack(fill="x", pady=(self.px(6), 0))
 
         group = PanelGroup(panel, self, "measure", tr("gui.group.measure"), tr("gui.group.measure.info"))
         ParameterSlider(group.body, self, tr("gui.slider.workers"), self.workers_var, 1,
                         max(2, os.cpu_count() or 2), lambda v: f"{v:.0f}").pack(fill="x")
+        ParameterToggle(group.body, self, tr("gui.toggle.watch"), self.watch_var).pack(fill="x", pady=(self.px(6), 0))
         self.load_btn = ttk.Button(group.body, text=tr("gui.btn.load"), style="Dark.TButton",
                                    command=self._load_report)
         self.load_btn.pack(anchor="w", pady=(self.px(10), 0))
@@ -604,13 +674,33 @@ class App:
         top = tk.Frame(list_tab, bg=D.canvas)
         top.pack(fill="x", padx=self.px(8), pady=self.px(6))
         ParameterToggle(top, self, tr("gui.only_reject"), self.only_reject_var, bg=D.canvas).pack(side="left")
-        table = tk.Frame(list_tab, bg=D.canvas)
-        table.pack(fill="both", expand=True)
+        self.override_btns = []
+        for key, choice in (("gui.btn.clear_override", None), ("gui.btn.force_reject", "reject"),
+                            ("gui.btn.force_keep", "keep")):
+            btn = ttk.Button(top, text=tr(key), style="Dark.TButton",
+                             command=lambda c=choice: self._set_override(c))
+            btn.pack(side="right", padx=(self.px(6), 0))
+            Tooltip(btn, tr("gui.override.help"), self)
+            self.override_btns.append(btn)
+        self.row_menu = tk.Menu(self.root, tearoff=False, bg=D.group_header, fg=D.label,
+                                activebackground=D.prominent, activeforeground="white", bd=0)
+        for key, choice in (("gui.btn.force_keep", "keep"), ("gui.btn.force_reject", "reject"),
+                            ("gui.btn.clear_override", None)):
+            self.row_menu.add_command(label=tr(key), command=lambda c=choice: self._set_override(c))
+        split = tk.Frame(list_tab, bg=D.canvas)
+        split.pack(fill="both", expand=True)
+        self._build_preview_pane(split)
+        table = tk.Frame(split, bg=D.canvas)
+        table.pack(side="left", fill="both", expand=True)
         self.tree = ttk.Treeview(table, columns=[c[0] for c in COLUMNS], show="headings", style="Dark.Treeview")
         for key, title, width, anchor in COLUMNS:
             self.tree.heading(key, text=tr(title), command=lambda k=key: self._sort_by(k))
             self.tree.column(key, width=self.px(width), anchor=anchor, stretch=key in ("file", "reason"))
         self.tree.tag_configure("reject", foreground=D.reject)
+        # 右鍵：Windows / Linux 是 Button-3，macOS 觸控板是 Button-2 或 Control-點
+        for sequence in ("<Button-3>", "<Button-2>", "<Control-Button-1>"):
+            self.tree.bind(sequence, self._show_row_menu)
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._schedule_preview())
         ys = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview, style="Dark.Vertical.TScrollbar")
         xs = ttk.Scrollbar(table, orient="horizontal", command=self.tree.xview, style="Dark.Horizontal.TScrollbar")
         self.tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
@@ -627,6 +717,125 @@ class App:
                                     insertbackground=D.label)
         self.summary_text.pack(fill="both", expand=True)
         self.summary_text.configure(state="disabled")
+
+    def _scroll_panel(self, event: tk.Event) -> None:
+        """滑鼠在右側面板上時，滾輪捲動面板（其他地方的滾輪照原本的行為）。"""
+        canvas = self.panel_canvas
+        if not canvas.winfo_exists():
+            return
+        widget = event.widget if isinstance(event.widget, tk.Misc) else None
+        if widget is None or not str(widget).startswith(str(canvas)):
+            return
+        if canvas.yview() == (0.0, 1.0):
+            return
+        # Windows 一格是 120，macOS 是 ±1 起跳的小數字
+        steps = -int(event.delta / 120) if abs(event.delta) >= 120 else -event.delta
+        canvas.yview_scroll(steps, "units")
+
+    # ------------------------------------------------------------------ 預覽
+
+    def _build_preview_pane(self, parent: tk.Widget) -> None:
+        D = Darkroom
+        pane = tk.Frame(parent, bg=D.list_bg, width=self.px(440))
+        pane.pack(side="right", fill="y")
+        pane.pack_propagate(False)
+        tk.Frame(parent, bg=D.separator, width=1).pack(side="right", fill="y")
+        self.preview_pane = pane
+        self.preview_title = tk.Label(pane, font=self.fonts.small, fg=D.label, bg=D.list_bg, anchor="w")
+        self.preview_title.pack(fill="x", padx=self.px(10), pady=(self.px(8), 0))
+        self.preview_sky = tk.Label(pane, font=self.fonts.small, fg=D.secondary, bg=D.list_bg, anchor="w")
+        self.preview_sky.pack(fill="x", padx=self.px(10), pady=(0, self.px(4)))
+        self.preview_thumb = tk.Label(pane, bg=D.list_bg, fg=D.secondary, font=self.fonts.small,
+                                      text=tr("gui.preview.hint"), cursor="crosshair")
+        self.preview_thumb.pack(padx=self.px(10))
+        self.preview_thumb.bind("<Button-1>", self._move_closeup)
+        self.preview_caption = tk.Label(pane, font=self.fonts.small, fg=D.secondary, bg=D.list_bg, anchor="w")
+        self.preview_caption.pack(fill="x", padx=self.px(10), pady=(self.px(8), self.px(4)))
+        self.preview_closeup = tk.Label(pane, bg=D.list_bg)
+        self.preview_closeup.pack(padx=self.px(10))
+
+    def _schedule_preview(self) -> None:
+        if self._preview_job is not None:
+            self.root.after_cancel(self._preview_job)
+        self._preview_job = self.root.after(120, self._load_preview)
+
+    def _current_path(self, name: str) -> Path | None:
+        """這張片現在在哪：還在 light 資料夾，或已經被搬到淘汰片資料夾。"""
+        folder, reject_dir = self._folder(), self._reject_dir()
+        if folder is None:
+            return None
+        home = folder / name
+        if home.exists():
+            return home
+        moved = read_move_log(reject_dir) if reject_dir else {}
+        target = moved.get(home.resolve())
+        return target if target is not None and target.exists() else None
+
+    def _load_preview(self) -> None:
+        self._preview_job = None
+        selected = self.tree.selection()
+        if not selected:
+            return
+        name = selected[0]
+        self._preview_name = name
+        self.preview_title.configure(text=name)
+        self.preview_sky.configure(text=self._sky_text(name))
+        if name in self._previews:
+            self._previews.move_to_end(name)
+            self._show_preview()
+            return
+        path = self._current_path(name)
+        if path is None:
+            self._clear_preview(tr("gui.preview.missing"))
+            return
+        self._clear_preview(tr("gui.preview.loading"))
+
+        def work() -> None:
+            try:
+                self.events.put(("preview", name, make_preview(path)))
+            except Exception as exc:  # noqa: BLE001
+                self.events.put(("preview_error", name, str(exc)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _sky_text(self, name: str) -> str:
+        """拍攝當下的天空，一行字；header 沒有座標、地點時是空的。"""
+        m = next((d.metrics for d in self.selection.decisions if Path(d.metrics.file).name == name), None)             if self.selection else None
+        if m is None or m.altitude is None:
+            return ""
+        illum = (m.moon_illum or 0) * 100
+        if m.moon_alt is not None and m.moon_alt > 0:
+            return tr("gui.preview.sky_moon_up", alt=m.altitude, moon=m.moon_alt, illum=illum, sep=m.moon_sep or 0)
+        return tr("gui.preview.sky_moon_down", alt=m.altitude, illum=illum)
+
+    def _clear_preview(self, text: str) -> None:
+        self.preview_thumb.configure(image="", text=text)
+        self.preview_closeup.configure(image="")
+        self.preview_caption.configure(text="")
+
+    def _show_preview(self) -> None:
+        preview = self._previews.get(self._preview_name or "")
+        if preview is None:
+            return
+        width = max(self.px(200), self.preview_pane.winfo_width() - self.px(20))
+        thumb = thumbnail(preview, width, self.px(300))
+        self._thumb_image = ImageTk.PhotoImage(thumb, master=self.root)
+        self.preview_thumb.configure(image=self._thumb_image, text="")
+        cells = max(40, width // 2)
+        self._closeup_image = ImageTk.PhotoImage(closeup(preview, *self._preview_center, cells, 2),
+                                                 master=self.root)
+        self.preview_closeup.configure(image=self._closeup_image)
+        self.preview_caption.configure(text=tr("gui.preview.closeup"))
+
+    def _move_closeup(self, event: tk.Event) -> None:
+        image = getattr(self, "_thumb_image", None)
+        if image is None or self._preview_name not in self._previews:
+            return
+        # Label 把圖置中，換算成圖上的相對位置
+        x = (event.x - (self.preview_thumb.winfo_width() - image.width()) / 2) / image.width()
+        y = (event.y - (self.preview_thumb.winfo_height() - image.height()) / 2) / image.height()
+        self._preview_center = (min(max(x, 0.0), 1.0), min(max(y, 0.0), 1.0))
+        self._show_preview()
 
     # ------------------------------------------------------------------ 說明氣泡
 
@@ -711,6 +920,7 @@ class App:
         self.status_var.set(self._status_fn())
         self._update_buttons()
         self._update_method_state()
+        self._update_weight_view()
         self._update_result_view()
 
     def _update_buttons(self) -> None:
@@ -753,6 +963,37 @@ class App:
             hint = tr("gui.welcome.hint")
         self.welcome_hint.configure(text=hint)
 
+    def _weights(self) -> dict[str, float] | None:
+        """目前的權重（相對值）；讀不到或全部是 0 時回傳 None。"""
+        try:
+            weights = {m: max(0.0, float(var.get())) for m, var in self.weight_vars.items()}
+        except (tk.TclError, ValueError):
+            return None
+        return weights if sum(weights.values()) > 0 else None
+
+    def _weights_are_recommended(self, weights: dict[str, float]) -> bool:
+        total = sum(weights.values())
+        return all(abs(weights[m] / total - DEFAULT_WEIGHTS[m]) < 0.005 for m in METRICS)
+
+    def _weight_share_text(self, metric: str) -> str:
+        weights = self._weights()
+        return f"{weights[metric] / sum(weights.values()) * 100:.0f}%" if weights else "—"
+
+    def _update_weight_view(self) -> None:
+        """每個滑桿右邊顯示換算後的百分比，上面標示建議 / 自訂。"""
+        weights = self._weights()
+        for m, slider in self.weight_sliders.items():
+            slider.value.configure(text=self._weight_share_text(m))
+        recommended = weights is not None and self._weights_are_recommended(weights)
+        self.weight_badge.configure(
+            text=tr("gui.weights.recommended") if recommended else tr("gui.weights.custom"),
+            fg=Darkroom.accent if recommended else Darkroom.beta)
+        self.reset_weights_btn.state(["disabled" if recommended else "!disabled"])
+
+    def _reset_weights(self) -> None:
+        for m, var in self.weight_vars.items():
+            var.set(DEFAULT_WEIGHTS[m] * 100)
+
     def _update_method_state(self) -> None:
         method = self.method_var.get()
         for key, slider in self.sliders.items():
@@ -791,11 +1032,16 @@ class App:
             self._update_buttons()
 
     def _set_folder(self, folder: Path) -> None:
-        if folder.is_file() and folder.suffix.lower() in FITS_SUFFIXES:
+        if folder.is_file() and folder.suffix.lower() in IMAGE_SUFFIXES:
             folder = folder.parent  # 拖一張 FITS 進來也行
+        self.watch_var.set(False)  # 換資料夾就停止監看，要監看新的資料夾再自己打開
         self.folder_var.set(str(folder))
         self.reject_var.set(str(folder / REJECT_DIR_NAME))
         self.frames, self.selection = [], None
+        self.overrides = read_overrides(folder / REPORT_NAME) if folder.is_dir() else {}
+        self._previews.clear()
+        self._preview_name = None
+        self._clear_preview(tr("gui.preview.hint"))
         self._fill_table()
         self._set_summary_text("")
         self.progress.configure(value=0)
@@ -842,29 +1088,36 @@ class App:
         if folder is None or reject_dir is None or not folder.is_dir():
             messagebox.showwarning(APP_NAME, tr("gui.warn.pick_folder"))
             return
-        try:
-            workers = max(1, int(float(self.workers_var.get())))
-        except (tk.TclError, ValueError):
-            workers = default_workers()
         files, home_of = collect_files(folder, reject_dir)
         if not files:
             messagebox.showwarning(APP_NAME, tr("gui.status.no_fits"))
             return
-        self.cancel.clear()
-        self.progress.configure(value=0, maximum=len(files))
         n, k = len(files), len(home_of)
         self._status(lambda: tr("gui.status.measuring", n=n,
                                 extra=tr("gui.status.includes_rejected", n=k) if k else ""))
+        self._run_measure(files, home_of, "measured")
+
+    def _workers(self) -> int:
+        try:
+            return max(1, int(float(self.workers_var.get())))
+        except (tk.TclError, ValueError):
+            return default_workers()
+
+    def _run_measure(self, files: list[Path], home_of: dict[str, str], kind: str) -> None:
+        """在背景量測，量完送出 (kind, 結果)：measured 是整批重量，watched 是監看到的新檔案。"""
+        self.cancel.clear()
+        self.progress.configure(value=0, maximum=len(files))
         self._started = time.monotonic()
-        self.worker = threading.Thread(target=self._measure_worker, args=(files, home_of, workers), daemon=True)
+        self.worker = threading.Thread(target=self._measure_worker,
+                                       args=(files, home_of, self._workers(), kind), daemon=True)
         self.worker.start()
         self._update_buttons()
 
-    def _measure_worker(self, files: list[Path], home_of: dict[str, str], workers: int) -> None:
+    def _measure_worker(self, files: list[Path], home_of: dict[str, str], workers: int, kind: str) -> None:
         try:
             frames = measure_files(files, workers, cancel=self.cancel, home_of=home_of,
                                    progress=lambda i, n, m: self.events.put(("progress", i, n, m)))
-            self.events.put(("measured", frames))
+            self.events.put((kind, frames))
         except Cancelled:
             self.events.put(("cancelled",))
         except Exception:  # noqa: BLE001
@@ -872,7 +1125,54 @@ class App:
 
     def _stop(self) -> None:
         self.cancel.set()
+        self.watch_var.set(False)  # 按停止就連監看一起停，免得下一輪又自動開始
         self._status(lambda: tr("gui.status.stopping"))
+
+    # ------------------------------------------------------------------ 監看資料夾
+
+    WATCH_INTERVAL_MS = 10_000
+
+    def _toggle_watch(self) -> None:
+        if self._watch_job is not None:
+            self.root.after_cancel(self._watch_job)
+            self._watch_job = None
+        self._watch_sizes = {}
+        if self.watch_var.get():
+            n = len(self.frames)
+            self._status(lambda: tr("gui.status.watching", n=n))
+            self._watch_tick()
+        elif not self._busy():
+            self._status(lambda: tr("gui.status.watch_off"))
+
+    def _watch_tick(self) -> None:
+        """檢查一次資料夾。新檔案的大小要連續兩次一樣（相機軟體寫完了）才量測。"""
+        if self._watch_job is not None:
+            self.root.after_cancel(self._watch_job)
+        self._watch_job = None
+        if not self.watch_var.get():
+            return
+        self._watch_job = self.root.after(self.WATCH_INTERVAL_MS, self._watch_tick)
+        folder, reject_dir = self._folder(), self._reject_dir()
+        if self._busy() or folder is None or reject_dir is None or not folder.is_dir():
+            return
+        files, home_of = collect_files(folder, reject_dir)
+        known = {Path(f.file).name for f in self.frames}
+        sizes, ready = {}, []
+        for p in files:
+            if Path(home_of.get(str(p), p)).name in known:
+                continue
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            sizes[str(p)] = size
+            if size > 0 and self._watch_sizes.get(str(p)) == size:
+                ready.append(p)
+        self._watch_sizes = sizes
+        if ready:
+            n = len(ready)
+            self._status(lambda: tr("gui.status.watch_measuring", n=n))
+            self._run_measure(ready, home_of, "watched")
 
     def _poll(self) -> None:
         try:
@@ -894,22 +1194,40 @@ class App:
 
     def _handle(self, event: tuple) -> None:
         kind = event[0]
+        if kind == "preview":
+            _, name, preview = event
+            self._previews[name] = preview
+            while len(self._previews) > 6:
+                self._previews.popitem(last=False)
+            if name == self._preview_name:
+                self._show_preview()
+            return
+        if kind == "preview_error":
+            if event[1] == self._preview_name:
+                self._clear_preview(tr("gui.preview.failed", error=event[2]))
+            return
         if kind == "progress":
             _, i, n, m = event
             self.progress.configure(value=i)
             eta = (time.monotonic() - self._started) / i * (n - i)
             name = Path(m.file).name
             self._status(lambda: self._progress_text(i, n, eta, name))
+        elif kind == "watched":
+            self.worker = None
+            new = event[1]
+            names = {Path(m.file).name for m in new}
+            self.frames = [f for f in self.frames if Path(f.file).name not in names] + new
+            self._apply()
+            self._save_report()
+            latest = max(new, key=lambda m: (m.date_obs or "", m.file))
+            n, name, total = len(new), Path(latest.file).name, len(self.frames)
+            self._status(lambda: tr("gui.status.watch_added", n=n, name=name, total=total))
+            self._update_buttons()
         elif kind == "measured":
             self.worker = None
             self.frames = event[1]
             self._apply()
-            folder = self._folder()
-            if folder is not None and self.selection is not None:
-                try:
-                    write_csv(self.selection.decisions, folder / REPORT_NAME)
-                except OSError as exc:
-                    messagebox.showwarning(APP_NAME, tr("gui.warn.report_save", error=exc))
+            self._save_report()
             took = (time.monotonic() - self._started) / 60
             n, errors = len(self.frames), sum(1 for f in self.frames if f.error)
             self._status(lambda: tr("gui.status.done", n=n, m=took)
@@ -926,6 +1244,14 @@ class App:
             self._status(lambda: tr("gui.status.failed"))
             self._update_buttons()
             messagebox.showerror(APP_NAME, tr("gui.err.measure", error=event[1][-1500:]))
+
+    def _save_report(self) -> None:
+        folder = self._folder()
+        if folder is not None and self.selection is not None:
+            try:
+                write_csv(self.selection.decisions, folder / REPORT_NAME)
+            except OSError as exc:
+                messagebox.showwarning(APP_NAME, tr("gui.warn.report_save", error=exc))
 
     # ------------------------------------------------------------------ 挑片
 
@@ -967,11 +1293,24 @@ class App:
         self._apply_job = None
         if not self.frames:
             return
+        weights = self._weights()
+        if weights is None:
+            self._status(lambda: tr("gui.status.no_weights"))
+            return
         cfg = self._config()
         if cfg is None:
             self._status(lambda: tr("gui.status.bad_threshold"))
             return
-        self.selection = sel = decide(self.frames, self._group_keys(), "score", cfg)
+        total = sum(weights.values())
+        cfg.weights = {m: w / total for m, w in weights.items()}
+        save_settings(weights=weights)
+        try:
+            tolerance = max(0.0, float(self.exposure_tol_var.get()))
+        except (tk.TclError, ValueError):
+            tolerance = EXPOSURE_TOLERANCE
+        save_settings(exposure_tolerance=tolerance)
+        self.selection = sel = decide(self.frames, self._group_keys(), "score", cfg, exposure_tolerance=tolerance,
+                                      overrides=self.overrides)
         n, kept = len(sel.decisions), sel.n_keep
         th = sel.thresholds
         if len(th) == 1:
@@ -983,6 +1322,7 @@ class App:
         self.metrics["frames"].set(str(n))
         self.metrics["kept"].set(str(kept))
         self.metrics["rejected"].set(str(n - kept))
+        self.metrics["manual"].set(str(sum(1 for d in sel.decisions if d.override)))
         results = [r for r in sel.results.values() if r is not None]
         if len(results) == 1:
             self.metrics["threshold"].set(f"{results[0].threshold:.1f}")
@@ -992,7 +1332,8 @@ class App:
             self.metrics["threshold"].set(tr("gui.metric.per_group") if results else "—")
             self.metrics["ref_fwhm"].set(tr("gui.metric.per_group") if results else "—")
 
-        lines: list[str] = []
+        parts = [f"{tr_metric(m)} {cfg.weights[m] * 100:.0f}%" for m in METRICS]
+        lines: list[str] = [tr("summary.weights", parts=tr("summary.part_sep").join(parts)), ""]
         for label, size in sel.group_sizes.items():
             lines.append(tr("summary.group_header", label=label or tr("group.all"), n=size))
             result = sel.results.get(label)
@@ -1012,6 +1353,7 @@ class App:
         self.summary_text.configure(state="disabled")
 
     def _fill_table(self) -> None:
+        selected = set(self.tree.selection())
         self.tree.delete(*self.tree.get_children())
         if self.selection is None:
             return
@@ -1021,12 +1363,46 @@ class App:
             if self.only_reject_var.get() and d.keep:
                 continue
             m = d.metrics
-            self.tree.insert("", "end", tags=() if d.keep else ("reject",), values=(
-                Path(m.file).name, keep_text if d.keep else reject_text, _fmt(d.score, ".1f"),
+            name = Path(m.file).name
+            result = keep_text if d.keep else reject_text
+            if d.override:
+                result = f"✎ {result}"  # 手動覆寫
+            self.tree.insert("", "end", iid=name, tags=() if d.keep else ("reject",), values=(
+                name, result, _fmt(d.score, ".1f"),
                 _fmt(m.fwhm, ".2f"), _fmt(m.eccentricity, ".2f"), m.n_stars, _fmt(m.background, ".0f"),
+                _fmt(m.snr, ".1f"), _fmt(m.altitude, ".0f"), _fmt(m.moon_alt, ".0f"),
                 d.group, "; ".join(str(r) for r in d.reasons)))
         if self._sort[0]:
             self._sort_by(self._sort[0], toggle=False)
+        keep = [iid for iid in selected if self.tree.exists(iid)]
+        if keep:
+            self.tree.selection_set(keep)
+
+    def _show_row_menu(self, event: tk.Event) -> str:
+        row = self.tree.identify_row(event.y)
+        if row and row not in self.tree.selection():
+            self.tree.selection_set(row)
+        if self.tree.selection():
+            self.row_menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    def _set_override(self, choice: str | None) -> None:
+        """把清單上選取的片強制保留 / 強制淘汰（choice=None 改回自動），並馬上存進報表。"""
+        names = list(self.tree.selection())
+        if not names or self.selection is None:
+            return
+        for name in names:
+            if choice is None:
+                self.overrides.pop(name, None)
+            else:
+                self.overrides[name] = choice
+        self._apply()
+        folder = self._folder()
+        if folder is not None and self.selection is not None:
+            try:
+                write_csv(self.selection.decisions, folder / REPORT_NAME)
+            except OSError as exc:
+                messagebox.showwarning(APP_NAME, tr("gui.warn.report_save", error=exc))
 
     def _sort_by(self, key: str, toggle: bool = True) -> None:
         """點欄位標題排序，同一欄再點一次反過來；toggle=False 用在重填清單後照原本的排序。"""
@@ -1111,15 +1487,15 @@ class App:
     def close(self) -> None:
         """停掉計時器、解除全域綁定、清掉畫面；之後 root 可以直接關掉，或拿來開新的 App。"""
         self.cancel.set()
-        for job in (self._poll_job, self._apply_job):
+        for job in (self._poll_job, self._apply_job, self._watch_job, self._preview_job):
             if job is not None:
                 try:
                     self.root.after_cancel(job)
                 except tk.TclError:
                     pass
-        self._poll_job = self._apply_job = None
+        self._poll_job = self._apply_job = self._watch_job = self._preview_job = None
         self.close_popover()
-        for sequence in ("<Control-o>", "<Button-1>", "<Escape>"):
+        for sequence in ("<Control-o>", "<Button-1>", "<Escape>", "<MouseWheel>"):
             self.root.unbind_all(sequence)
         for child in self.root.winfo_children():
             child.destroy()

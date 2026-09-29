@@ -6,12 +6,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from .grouping import GROUP_KEYS, parse_group_keys
+from .grouping import EXPOSURE_TOLERANCE, GROUP_KEYS, parse_group_keys
 from .i18n import APP_NAME, APP_SUBTITLE, tr, tr_error
 from .metrics import FrameMetrics
 from .mover import restore_rejected, sync_files
 from .pipeline import REJECT_DIR_NAME, REPORT_NAME, collect_files, decide, measure_files
-from .report import print_score_summary, print_summary, read_csv, write_csv
+from .report import print_score_summary, print_summary, read_csv, read_overrides, write_csv
 from .scoring import METRICS, ScoreConfig
 from .selector import Thresholds
 
@@ -36,6 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--group-by", type=str, default="filter,exposure",
                    help=f"依這些欄位分組、各組分開算門檻，逗號分隔（{', '.join(GROUP_KEYS)}），"
                         "none 表示整批一起算（預設 filter,exposure）")
+    p.add_argument("--exposure-tolerance", type=float, default=EXPOSURE_TOLERANCE,
+                   help=f"曝光時間差在幾秒以內算同一組（單眼 B 快門常有一兩秒誤差，預設 {EXPOSURE_TOLERANCE:g}）")
     p.add_argument("--plot", nargs="?", type=Path, const=True, default=None,
                    help="輸出指標趨勢圖 PNG（預設 <folder>/selection_plot.png，需要 matplotlib）")
     p.add_argument("--restore", action="store_true",
@@ -167,7 +169,10 @@ def main(argv: list[str] | None = None) -> int:
         cfg.weights = weights
     th = _build_thresholds(args)
 
-    sel = decide(frames, group_keys, args.mode, cfg, th)
+    # 視窗版在清單上手動覆寫的結果存在報表裡；重寫報表前先讀出來，照樣套用
+    report = args.report or folder / REPORT_NAME
+    overrides = read_overrides(args.from_report or report)
+    sel = decide(frames, group_keys, args.mode, cfg, th, args.exposure_tolerance, overrides)
     for label, size in sel.group_sizes.items():
         if len(sel.group_sizes) > 1:
             print(f"\n== {label}（{size} 張）==")
@@ -179,7 +184,6 @@ def main(argv: list[str] | None = None) -> int:
                 print_score_summary(result)
     decisions = sel.decisions
 
-    report = args.report or folder / REPORT_NAME
     write_csv(decisions, report)
     print_summary(decisions)
     print(f"\n報表: {report}")
