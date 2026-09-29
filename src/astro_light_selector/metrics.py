@@ -19,6 +19,11 @@ FITS_SUFFIXES = {".fit", ".fits", ".fts"}
 # 能挑片的所有檔案：FITS 加上各廠牌相機的 RAW
 IMAGE_SUFFIXES = FITS_SUFFIXES | RAW_SUFFIXES
 
+
+def is_image(path: Path) -> bool:
+    """能挑片的檔案。macOS 在 exFAT / 網路磁碟上會留下「._檔名.fit」附屬檔，副檔名一樣但不是影像。"""
+    return path.suffix.lower() in IMAGE_SUFFIXES and not path.name.startswith(".")
+
 # 星點偵測門檻（背景雜訊的倍數）
 DETECT_SIGMA = 5.0
 # 偵測時假設的 FWHM（像素），只影響偵測核，不影響量測結果

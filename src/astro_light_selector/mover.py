@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import csv
+import os
+import re
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
-from .metrics import IMAGE_SUFFIXES
+from .metrics import is_image
 from .selector import Decision
 
 # 記錄程式搬了哪些檔案（原位置 -> 目前位置）。重跑時靠它把之前 reject 的也算進同一批、
@@ -20,8 +22,39 @@ def read_move_log(reject_dir: Path) -> dict[Path, Path]:
     log = reject_dir / MOVE_LOG
     if not log.exists():
         return {}
+    reject_dir = reject_dir.resolve()
+    entries: dict[Path, Path] = {}
     with log.open(newline="", encoding="utf-8-sig") as fh:
-        return {Path(row["source"]).resolve(): Path(row["target"]).resolve() for row in csv.DictReader(fh)}
+        for row in csv.DictReader(fh):
+            src, target = Path(row["source"]).resolve(), Path(row["target"]).resolve()
+            if target.parent != reject_dir:
+                src, target = _relocate(row["source"], row["target"], reject_dir, src, target)
+            entries[src] = target
+    return entries
+
+
+def _pure_path(text: str) -> PurePath:
+    """另一台電腦寫的紀錄：Windows 的路徑在 Mac 上也要拆得開。"""
+    if "\\" in text or re.match(r"[A-Za-z]:", text):
+        return PureWindowsPath(text)
+    return PurePosixPath(text)
+
+
+def _relocate(source: str, target: str, reject_dir: Path, src: Path, cur: Path) -> tuple[Path, Path]:
+    """紀錄檔在 reject_dir 裡，目標卻不在：整個資料夾搬過位置（換電腦、複製到隨身碟）。
+
+    照 reject_dir 現在的位置換算，原位置跟 reject_dir 的相對關係不變（通常原位置就是上一層）。
+    reject_dir 裡找不到這個檔案（例如被使用者刪了）就照紀錄原樣回傳。
+    """
+    s, t = _pure_path(source), _pure_path(target)
+    if not (reject_dir / t.name).exists():
+        return src, cur
+    home, old_reject = s.parent.parts, t.parent.parts
+    n = 0
+    while n < min(len(home), len(old_reject)) and home[n].lower() == old_reject[n].lower():
+        n += 1
+    new_home = reject_dir.joinpath(*[".."] * (len(old_reject) - n), *home[n:])
+    return Path(os.path.normpath(new_home / s.name)), reject_dir / t.name
 
 
 def write_move_log(reject_dir: Path, entries: dict[Path, Path]) -> None:
@@ -115,7 +148,7 @@ def restore_rejected(reject_dir: Path, folder: Path, dry_run: bool = False) -> l
     logged = set(log.values())
     if reject_dir.is_dir():
         for p in sorted(reject_dir.iterdir()):
-            if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES and p.resolve() not in logged:
+            if p.is_file() and is_image(p) and p.resolve() not in logged:
                 pairs.append((p, folder / p.name))
 
     restored: list[Path] = []

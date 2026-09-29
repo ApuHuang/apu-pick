@@ -69,8 +69,31 @@ def build() -> Path:
         args += ["--exclude-module", mod]
     PyInstaller.__main__.run(args)
     if IS_MAC:
-        return DIST / f"{NAME}.app" / "Contents" / "MacOS" / NAME
+        app = DIST / f"{NAME}.app"
+        set_bundle_info(app)
+        return app / "Contents" / "MacOS" / NAME
     return DIST / NAME / f"{NAME}.exe"
+
+
+def set_bundle_info(app: Path) -> None:
+    """補齊 Info.plist，改完重新簽章。
+
+    - 版本：命令列打包的 PyInstaller 一律填 0.0.0，Finder「取得資訊」和「關於」視窗看得到
+    - 系統元件跟著系統語言：沒宣告的話，選資料夾視窗、確認對話框的按鈕、選單的「隱藏」「結束」都是英文
+
+    改了 Info.plist 原本的簽章就失效，Apple 晶片的 Mac 會說 app「已損毀」，所以要重新做 ad-hoc 簽章。
+    """
+    import plistlib
+
+    plist = app / "Contents" / "Info.plist"
+    info = plistlib.loads(plist.read_bytes())
+    info["CFBundleShortVersionString"] = __version__
+    info["CFBundleVersion"] = __version__
+    info["CFBundleAllowMixedLocalizations"] = True
+    info["CFBundleLocalizations"] = ["en", "zh-Hant"]
+    plist.write_bytes(plistlib.dumps(info))
+    subprocess.run(["codesign", "--force", "--sign", "-", str(app)], check=True)
+    subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
 
 
 def smoke_test(exe: Path) -> None:

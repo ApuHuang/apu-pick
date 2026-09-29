@@ -21,12 +21,12 @@ from tkinter import filedialog, font, messagebox, ttk
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
-from PIL import ImageTk
+from PIL import Image, ImageTk
 
 from . import __version__
 from .grouping import EXPOSURE_TOLERANCE
 from .i18n import APP_NAME, APP_SUBTITLE, LANGUAGES, get_language, set_language, tr, tr_metric
-from .metrics import IMAGE_SUFFIXES, FrameMetrics
+from .metrics import FrameMetrics, is_image
 from .mover import read_move_log, restore_rejected, sync_files
 from .pipeline import (REJECT_DIR_NAME, REPORT_NAME, Cancelled, Selection, collect_files, decide,
                        measure_files)
@@ -39,6 +39,11 @@ from .settings import load_settings, save_settings
 ASSETS = Path(__file__).parent / "assets"
 ICON = ASSETS / "app.ico"
 LOGO = ASSETS / "icon_128.png"
+IS_MAC = sys.platform == "darwin"
+# 開啟資料夾的快捷鍵（說明文字用）；Mac 的 ⌘O 照慣例放在選單列，見 _build_menubar
+OPEN_SHORTCUT = "⌘O" if IS_MAC else "Ctrl+O"
+# 清單多選時按住的鍵（Mac 的 Control+點是右鍵）
+MULTI_SELECT_KEY = "⌘" if IS_MAC else "Ctrl"
 
 
 class Darkroom:
@@ -132,6 +137,51 @@ class Fonts:
 
 
 # ---------------------------------------------------------------------- 元件
+
+
+class DarkToolbar(NavigationToolbar2Tk):
+    """趨勢圖下面 matplotlib 的工具列，按鈕換成暗房樣式的 ttk 按鈕。
+
+    matplotlib 用 tk.Button：Mac 上 tk.Button 一律畫成系統的淺色按鈕、不理背景色，
+    matplotlib 又看背景是深色就把圖示換成白色，白色圖示畫在白色按鈕上就看不見了。
+    ttk 按鈕照 clam 主題自己畫，Windows、Mac 長得一樣。
+    """
+
+    def _Button(self, text, image_file, toggle, command):  # noqa: N802  覆寫 matplotlib 的方法
+        path = Path(image_file)
+        large = path.with_name(f"{path.stem}_large.png")
+        size = self.winfo_pixels("18p")
+        with Image.open(large if size > 24 and large.exists() else path) as im:
+            shape = im.convert("RGBA").resize((size, size)).getchannel("A")
+
+        def icon(color: str) -> ImageTk.PhotoImage:
+            img = Image.new("RGBA", shape.size, color)
+            img.putalpha(shape)
+            return ImageTk.PhotoImage(img, master=self)
+
+        images = (icon(Darkroom.label), icon("#5c5c5c"))
+        spec = (images[0], "disabled", images[1])
+        if toggle:
+            button = _ToolToggle(self, image=spec, command=command, style="Tool.Toolbutton")
+        else:
+            button = ttk.Button(self, image=spec, command=command, style="Tool.TButton", takefocus=False)
+        button.images = images  # 留著參照，不然圖會被回收
+        button.pack(side="left")
+        return button
+
+
+class _ToolToggle(ttk.Checkbutton):
+    """平移、放大這種切換鈕；matplotlib 會呼叫 select / deselect 同步狀態。"""
+
+    def __init__(self, master: tk.Misc, **kw: object):
+        self.var = tk.IntVar(master=master)
+        super().__init__(master, variable=self.var, takefocus=False, **kw)
+
+    def select(self) -> None:
+        self.var.set(1)
+
+    def deselect(self) -> None:
+        self.var.set(0)
 
 
 class Tooltip:
@@ -394,7 +444,10 @@ class App:
         self._scale = root.winfo_fpixels("1i") / 96.0
         self.fonts = Fonts(root)
         root.title(f"{APP_NAME} {__version__}")
-        root.geometry(f"{self.px(1320)}x{self.px(900)}")
+        # 螢幕放不下完整大小（例如 13 吋 MacBook Air 的 1470×956）就縮到螢幕裡
+        width = min(self.px(1320), root.winfo_screenwidth() - self.px(40))
+        height = min(self.px(900), root.winfo_screenheight() - self.px(110))
+        root.geometry(f"{width}x{height}")
         root.minsize(self.px(1080), self.px(720))
         root.configure(bg=Darkroom.canvas)
         self._setup_style()
@@ -409,11 +462,14 @@ class App:
         self.watch_var.trace_add("write", lambda *_: self._toggle_watch())
         # 延到事件處理完再換：換語言會重建介面，包含正在處理點擊的那個切換鈕
         self.lang_var.trace_add("write", lambda *_: root.after_idle(self._change_language))
-        root.bind_all("<Control-o>", lambda _e: self._browse_folder())
+        if not IS_MAC:  # Mac 的 ⌘O 在選單列（_build_menubar）
+            root.bind_all("<Control-o>", lambda _e: self._browse_folder())
         root.bind_all("<Button-1>", self._maybe_close_popover, add="+")
         root.bind_all("<Escape>", lambda _e: self.close_popover())
         root.bind_all("<MouseWheel>", self._scroll_panel, add="+")
         root.protocol("WM_DELETE_WINDOW", self._on_close)
+        if IS_MAC:  # Command+Q 跟按紅色關閉鈕一樣：量測中要先問；Tk 預設是直接結束程式
+            root.createcommand("::tk::mac::Quit", self._on_close)
         self._refresh_all()
         self._poll_job: str | None = root.after(100, self._poll)
         if folder:
@@ -460,6 +516,14 @@ class App:
         style.map("Dark.TNotebook.Tab", background=[("selected", D.group_header)],
                   foreground=[("selected", D.label)], lightcolor=[("selected", D.group_header)])
         style.configure("Canvas.TFrame", background=D.canvas)
+        # 趨勢圖工具列的圖示按鈕：平的，滑過去才有底色，切換鈕按下去維持亮一階
+        tool_colors = [("disabled", D.chrome), ("pressed", D.segment_on), ("selected", D.segment_on),
+                       ("active", D.hover)]
+        for name in ("Tool.TButton", "Tool.Toolbutton"):
+            style.configure(name, background=D.chrome, bordercolor=D.chrome, lightcolor=D.chrome,
+                            darkcolor=D.chrome, focuscolor=D.chrome, relief="flat", padding=self.px(3))
+            style.map(name, background=tool_colors, bordercolor=tool_colors, lightcolor=tool_colors,
+                      darkcolor=tool_colors)
         style.configure("Dark.Treeview", background=D.list_bg, fieldbackground=D.list_bg, foreground=D.label,
                         bordercolor=D.chrome, lightcolor=D.list_bg, darkcolor=D.list_bg,
                         rowheight=self.px(22), font=self.fonts.ui)
@@ -481,6 +545,8 @@ class App:
             self.root.option_add(pattern, value)
 
     def _build(self) -> None:
+        if IS_MAC:
+            self._build_menubar()
         self._build_top_bar()
         self._build_status_bar()
         body = tk.Frame(self.root, bg=Darkroom.canvas)
@@ -488,6 +554,36 @@ class App:
         self._build_panel(body)
         tk.Frame(body, bg=Darkroom.separator, width=1).pack(side="right", fill="y")
         self._build_canvas_area(body)
+
+    def _build_menubar(self) -> None:
+        """Mac 的選單列，換掉 Tk 預設的英文選單。
+
+        Mac 的快捷鍵慣例是放在選單項目上（⌘O 開啟資料夾）。
+        「關於」顯示系統的關於視窗（版本、圖示取自 Info.plist）；隱藏、結束由系統提供。
+        """
+        root = self.root
+        menubar = tk.Menu(root)
+        app_menu = tk.Menu(menubar, name="apple", tearoff=False)
+        app_menu.add_command(label=tr("gui.menu.about"),
+                             command=lambda: root.tk.call("::tk::mac::standardAboutPanel"))
+        app_menu.add_separator()
+        menubar.add_cascade(menu=app_menu)
+        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label=tr("gui.menu.open"), accelerator="Command-O", command=self._browse_folder)
+        menubar.add_cascade(label=tr("gui.menu.file"), menu=file_menu)
+        edit_menu = tk.Menu(menubar, tearoff=False)
+        edit_menu.add_command(label=tr("gui.menu.copy"), accelerator="Command-C",
+                              command=lambda: self._text_target().event_generate("<<Copy>>"))
+        edit_menu.add_command(label=tr("gui.menu.select_all"), accelerator="Command-A",
+                              command=lambda: self._text_target().event_generate("<<SelectAll>>"))
+        menubar.add_cascade(label=tr("gui.menu.edit"), menu=edit_menu)
+        menubar.add_cascade(label=tr("gui.menu.window"), menu=tk.Menu(menubar, name="window"))
+        root.configure(menu=menubar)
+
+    def _text_target(self) -> tk.Misc:
+        """拷貝、全選的對象：門檻細節的文字是唯讀的，點了不會拿到焦點，所以沒有焦點時就是它。"""
+        widget = self.root.focus_get()
+        return widget if isinstance(widget, tk.Text) else self.summary_text
 
     def _build_top_bar(self) -> None:
         D = Darkroom
@@ -511,7 +607,7 @@ class App:
         self.open_btn = ttk.Button(actions, text=tr("gui.btn.open"), style="Dark.TButton",
                                    command=self._browse_folder)
         self.open_btn.pack(side="left")
-        Tooltip(self.open_btn, tr("gui.btn.open.help"), self)
+        Tooltip(self.open_btn, tr("gui.btn.open.help", shortcut=OPEN_SHORTCUT), self)
         self.measure_btn = ttk.Button(actions, style="Dark.TButton", command=self._measure_or_stop)
         self.measure_btn.pack(side="left", padx=(self.px(6), 0))
         Tooltip(self.measure_btn, tr("gui.btn.measure.help"), self)
@@ -565,6 +661,7 @@ class App:
 
         panel.bind("<Configure>", relayout)
         canvas.bind("<Configure>", relayout)
+        self._relayout_panel = relayout
 
         group = PanelGroup(panel, self, "result", tr("gui.group.result"), tr("gui.group.result.info"))
         self.metrics = {key: MetricRow(group.body, self, tr(f"gui.metric.{key}"))
@@ -655,7 +752,7 @@ class App:
         self.nb.add(plot_tab, text=tr("gui.tab.plot"))
         self.fig = Figure(figsize=(10, 6), layout="constrained", facecolor=D.canvas)
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_tab)
-        toolbar = NavigationToolbar2Tk(self.canvas, plot_tab, pack_toolbar=False)
+        toolbar = DarkToolbar(self.canvas, plot_tab, pack_toolbar=False)
         toolbar.configure(background=D.chrome)
         for child in toolbar.winfo_children():
             try:
@@ -680,7 +777,7 @@ class App:
             btn = ttk.Button(top, text=tr(key), style="Dark.TButton",
                              command=lambda c=choice: self._set_override(c))
             btn.pack(side="right", padx=(self.px(6), 0))
-            Tooltip(btn, tr("gui.override.help"), self)
+            Tooltip(btn, tr("gui.override.help", shortcut=MULTI_SELECT_KEY), self)
             self.override_btns.append(btn)
         self.row_menu = tk.Menu(self.root, tearoff=False, bg=D.group_header, fg=D.label,
                                 activebackground=D.prominent, activeforeground="white", bd=0)
@@ -894,6 +991,9 @@ class App:
         if self.frames:
             self._apply()
         self._refresh_all()
+        # Mac：在已經顯示的視窗裡重建，Canvas 裡的面板要等整個畫面排完再排一次才會畫出來，不然整片空白
+        self.root.update_idletasks()
+        self._relayout_panel()
 
     # ------------------------------------------------------------------ 狀態
 
@@ -1032,7 +1132,7 @@ class App:
             self._update_buttons()
 
     def _set_folder(self, folder: Path) -> None:
-        if folder.is_file() and folder.suffix.lower() in IMAGE_SUFFIXES:
+        if folder.is_file() and is_image(folder):
             folder = folder.parent  # 拖一張 FITS 進來也行
         self.watch_var.set(False)  # 換資料夾就停止監看，要監看新的資料夾再自己打開
         self.folder_var.set(str(folder))
@@ -1544,6 +1644,9 @@ def main(argv: list[str] | None = None) -> int:
         set_language(lang)
     _enable_dpi_awareness()
     root = tk.Tk()
+    if IS_MAC:
+        # Mac 的 Tk 以 72 dpi 計算，9 點的字只有 Windows（96 dpi）的四分之三大；調成一樣，兩邊的版面才一致
+        root.tk.call("tk", "scaling", 96 / 72)
     if ICON.is_file():
         try:
             root.iconbitmap(default=str(ICON))

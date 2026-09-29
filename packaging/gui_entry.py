@@ -50,8 +50,28 @@ def smoke_test(folder: str, out: str) -> int:
         return 1
 
 
+def keep_font_cache() -> None:
+    """matplotlib 的字型清單存在固定位置，下次開啟直接讀。
+
+    PyInstaller 預設每次啟動都給 matplotlib 一個新的暫存資料夾，字型清單每次重建；
+    Mac 上重建要跑 system_profiler 列出所有字型，視窗要等 20 秒以上才出現。
+    打包成資料夾（不是單一 exe）時字型的路徑固定，程式被搬走 matplotlib 也會自己重建。
+    """
+    import os
+
+    from astro_light_selector.settings import config_dir
+
+    folder = config_dir() / "matplotlib"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return  # 建不了就照 PyInstaller 預設用暫存資料夾
+    os.environ["MPLCONFIGDIR"] = str(folder)
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    keep_font_cache()
     if len(sys.argv) == 4 and sys.argv[1] == "--smoke-test":
         sys.exit(smoke_test(sys.argv[2], sys.argv[3]))
     from astro_light_selector.gui import main

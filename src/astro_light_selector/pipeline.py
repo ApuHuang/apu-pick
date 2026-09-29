@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .grouping import EXPOSURE_TOLERANCE, group_frames
-from .metrics import IMAGE_SUFFIXES, FrameMetrics, measure
+from .metrics import FrameMetrics, is_image, measure
 from .mover import moved_away
 from .scoring import ScoreConfig, ScoreResult
 from .selector import Decision, Reason, Thresholds, select, select_by_score
@@ -25,7 +25,7 @@ class Cancelled(Exception):
 
 
 def find_fits(folder: Path) -> list[Path]:
-    return sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES)
+    return sorted(p for p in folder.iterdir() if p.is_file() and is_image(p))
 
 
 def collect_files(folder: Path, reject_dir: Path) -> tuple[list[Path], dict[str, str]]:

@@ -142,6 +142,24 @@ def test_cli_restore_moves_files_back(tmp_path: Path):
     assert not list((tmp_path / "rejected").glob("*.fits"))
 
 
+def test_macos_appledouble_files_are_ignored(tmp_path: Path):
+    """exFAT 隨身碟上 macOS 會留下「._檔名.fit」，不能當成影像量測，也不能被還原搬走。"""
+    from astro_light_selector.pipeline import collect_files
+
+    files = make_session(tmp_path)
+    junk = [tmp_path / f"._{p.name}" for p in files["good"][:2]]
+    for p in junk:
+        p.write_bytes(b"\x00\x05\x16\x07")
+    found, _ = collect_files(tmp_path, tmp_path / "rejected")
+    assert not any(p.name.startswith("._") for p in found)
+
+    rejected = tmp_path / "rejected"
+    rejected.mkdir()
+    (rejected / "._light_999.fits").write_bytes(b"\x00\x05\x16\x07")
+    assert main([str(tmp_path), "--restore"]) == 0
+    assert not (tmp_path / "._light_999.fits").exists()
+
+
 def test_cli_from_report_after_move_does_not_fail(tmp_path: Path):
     make_session(tmp_path)
     assert main([str(tmp_path)]) == 0
@@ -267,6 +285,32 @@ def test_rerun_measure_includes_previous_rejects(tmp_path: Path):
     assert len(report.splitlines()) - 1 == len(files["good"]) + len(files["bad"])
 
     # 放寬後重新量測，之前 reject 的也會搬回來
+    assert main([str(tmp_path), "--min-score", "0"]) == 0
+    assert (tmp_path / "bad_seeing.fits").exists()
+    _assert_locations_match_report(tmp_path)
+
+
+@pytest.mark.parametrize("old_home", [r"C:\Users\someone\Desktop\NGC7635\Light", "/Users/someone/NGC7635/Light"])
+def test_move_log_follows_moved_folder(tmp_path: Path, old_home: str):
+    """在別台電腦挑過、整個資料夾複製過來：紀錄裡的絕對路徑對不上，要照 rejected 現在的位置換算。"""
+    files = make_session(tmp_path)
+    rejected = tmp_path / "rejected"
+    assert main([str(tmp_path)]) == 0
+    first = sorted(p.name for p in rejected.glob("*.fits"))
+    assert first
+
+    sep = "\\" if "\\" in old_home else "/"
+    log = rejected / "moves.csv"
+    log.write_text("source,target\n" + "".join(f"{old_home}{sep}{n},{old_home}{sep}rejected{sep}{n}\n" for n in first),
+                   encoding="utf-8-sig")
+
+    # 重新量測：之前 reject 的也算進同一批，結果不變
+    assert main([str(tmp_path)]) == 0
+    assert sorted(p.name for p in rejected.glob("*.fits")) == first
+    report = (tmp_path / "selection_report.csv").read_text(encoding="utf-8-sig")
+    assert len(report.splitlines()) - 1 == len(files["good"]) + len(files["bad"])
+
+    # 放寬後照紀錄搬回原位
     assert main([str(tmp_path), "--min-score", "0"]) == 0
     assert (tmp_path / "bad_seeing.fits").exists()
     _assert_locations_match_report(tmp_path)
