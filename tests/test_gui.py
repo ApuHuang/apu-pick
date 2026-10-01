@@ -54,19 +54,21 @@ def tk_root():
 
 @pytest.fixture
 def make_app(tk_root):
-    """建立 App；測試結束時停掉它的計時器、清掉畫面，下一個測試再用同一個 Tk。"""
+    """建立 PickView；測試結束時停掉它的計時器、刪掉它，下一個測試再用同一個 Tk。"""
     from astro_light_selector import gui
 
     apps = []
 
     def make(folder):
-        app = gui.App(tk_root, str(folder))
+        app = gui.PickView(tk_root, tk_root, str(folder))
+        app.pack(fill="both", expand=True)
         apps.append(app)
         return app
 
     yield make
     for app in apps:
         app.close()
+        app.destroy()
 
 
 def _pump(root: tk.Tk, cond, timeout: float = 180) -> None:
@@ -88,7 +90,7 @@ def test_gui_measure_adjust_move_restore(tmp_path: Path, make_app, dialogs):
     assert app.selection is None
     app.workers_var.set("2")  # 走多核心那條路
     app._start_measure()
-    _pump(root, lambda: app.selection is not None and not app._busy())
+    _pump(root, lambda: app.selection is not None and not app.is_busy())
 
     assert (tmp_path / "selection_report.csv").is_file()
     assert len(app.selection.decisions) == len(files["good"]) + len(files["bad"])
@@ -127,7 +129,7 @@ def test_gui_bad_threshold_input_is_ignored(tmp_path: Path, make_app):
     root = app.root
     app.workers_var.set("1")
     app._start_measure()
-    _pump(root, lambda: app.selection is not None and not app._busy())
+    _pump(root, lambda: app.selection is not None and not app.is_busy())
     before = app.selection
 
     app.method_var.set("keep_best")
@@ -147,7 +149,7 @@ def test_gui_switch_language_keeps_results(tmp_path: Path, make_app, isolated_se
     root = app.root
     app.workers_var.set("1")
     app._start_measure()
-    _pump(root, lambda: app.selection is not None and not app._busy())
+    _pump(root, lambda: app.selection is not None and not app.is_busy())
     n_reject = sum(not d.keep for d in app.selection.decisions)
     assert f"淘汰 {n_reject}" in app.summary_var.get()
 
@@ -170,6 +172,48 @@ def test_gui_switch_language_keeps_results(tmp_path: Path, make_app, isolated_se
     assert f"淘汰 {n_reject}" in app.summary_var.get()
 
 
+def test_gui_view_is_embeddable(tmp_path: Path, tk_root):
+    """PickView 要能嵌進整合版的分頁：不綁全域事件、重建與關閉只動自己，語言切換可以交給外面。"""
+    from astro_light_selector import gui, i18n
+
+    make_session(tmp_path, n_good=3)
+    neighbour = tk.Frame(tk_root)  # 同一個視窗裡別套的畫面
+    neighbour.pack()
+    asked: list[str] = []
+    view = gui.PickView(tk_root, tk_root, str(tmp_path), on_language=asked.append)
+    view.pack(fill="both", expand=True)
+    try:
+        for sequence in ("<Button-1>", "<Escape>", "<MouseWheel>", "<Control-o>"):
+            assert not tk_root.bind_all(sequence)
+
+        view._set_language("en")
+        _pump(tk_root, lambda: asked == ["en"])
+        assert i18n.get_language() == "zh"  # 交給外面決定，View 自己不換
+
+        view.rebuild()
+        assert neighbour.winfo_exists()
+        assert view.is_busy() is False
+    finally:
+        view.close()
+        view.destroy()
+    assert neighbour.winfo_exists()
+    neighbour.destroy()
+
+    quiet = gui.PickView(tk_root, tk_root, show_language=False)
+    try:
+        assert not any(isinstance(w, gui.Segmented) and "zh" in w.labels for w in _descendants(quiet))
+    finally:
+        quiet.close()
+        quiet.destroy()
+
+
+def _descendants(widget: tk.Misc) -> list[tk.Misc]:
+    out = []
+    for child in widget.winfo_children():
+        out += [child, *_descendants(child)]
+    return out
+
+
 def test_gui_custom_weights(tmp_path: Path, make_app, isolated_settings: Path):
     import json
 
@@ -178,7 +222,7 @@ def test_gui_custom_weights(tmp_path: Path, make_app, isolated_settings: Path):
     root = app.root
     app.workers_var.set("1")
     app._start_measure()
-    _pump(root, lambda: app.selection is not None and not app._busy())
+    _pump(root, lambda: app.selection is not None and not app.is_busy())
     default_scores = {d.metrics.file: d.score for d in app.selection.decisions}
     assert app.weight_badge.cget("text") == "建議權重"
     assert app.weight_sliders["fwhm"].value.cget("text") == "35%"
@@ -218,7 +262,7 @@ def test_gui_manual_override(tmp_path: Path, make_app):
     root = app.root
     app.workers_var.set("1")
     app._start_measure()
-    _pump(root, lambda: app.selection is not None and not app._busy())
+    _pump(root, lambda: app.selection is not None and not app.is_busy())
     bad, good = files["bad"][0].name, files["good"][0].name
     by_name = lambda: {Path(d.metrics.file).name: d for d in app.selection.decisions}  # noqa: E731
     assert not by_name()[bad].keep and by_name()[good].keep
@@ -256,7 +300,7 @@ def test_gui_preview(tmp_path: Path, make_app):
     root = app.root
     app.workers_var.set("1")
     app._start_measure()
-    _pump(root, lambda: app.selection is not None and not app._busy())
+    _pump(root, lambda: app.selection is not None and not app.is_busy())
 
     name = files["good"][0].name
     app.tree.selection_set(name)
@@ -277,27 +321,27 @@ def test_gui_watch_folder_measures_new_files(tmp_path: Path, make_app, monkeypat
 
     from .synth import make_star_field, write_fits
 
-    monkeypatch.setattr(gui.App, "WATCH_INTERVAL_MS", 600_000)  # 測試自己呼叫 _watch_tick
+    monkeypatch.setattr(gui.PickView, "WATCH_INTERVAL_MS", 600_000)  # 測試自己呼叫 _watch_tick
     make_session(tmp_path, n_good=3)
     app = make_app(tmp_path)
     root = app.root
     app.workers_var.set("1")
     app._start_measure()
-    _pump(root, lambda: app.selection is not None and not app._busy())
+    _pump(root, lambda: app.selection is not None and not app.is_busy())
     before = len(app.frames)
 
     app.watch_var.set(True)
     assert "監看中" in app.status_var.get()
     new = write_fits(tmp_path / "new.fits", make_star_field(fwhm=3.0, seed=99), date_obs="2026-09-15T12:00:00")
     app._watch_tick()  # 第一次只記下檔案大小，可能還在寫
-    assert not app._busy() and len(app.frames) == before
+    assert not app.is_busy() and len(app.frames) == before
     app._watch_tick()  # 大小沒變：寫完了，開始量
-    _pump(root, lambda: not app._busy() and len(app.frames) == before + 1)
+    _pump(root, lambda: not app.is_busy() and len(app.frames) == before + 1)
     assert new.name in {Path(d.metrics.file).name for d in app.selection.decisions}
     assert new.name in (tmp_path / "selection_report.csv").read_text(encoding="utf-8-sig")
     assert "新增 1 張" in app.status_var.get()
     app._watch_tick()  # 已經量過的不會再量
-    assert not app._busy()
+    assert not app.is_busy()
 
     app.watch_var.set(False)
     assert app._watch_job is None

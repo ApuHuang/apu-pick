@@ -98,9 +98,9 @@ class DarkToolbar(NavigationToolbar2Tk):
         images = (icon(Darkroom.label), icon("#5c5c5c"))
         spec = (images[0], "disabled", images[1])
         if toggle:
-            button = _ToolToggle(self, image=spec, command=command, style="Tool.Toolbutton")
+            button = _ToolToggle(self, image=spec, command=command, style="Pick.Tool.Toolbutton")
         else:
-            button = ttk.Button(self, image=spec, command=command, style="Tool.TButton", takefocus=False)
+            button = ttk.Button(self, image=spec, command=command, style="Pick.Tool.TButton", takefocus=False)
         button.images = images  # 留著參照，不然圖會被回收
         button.pack(side="left")
         return button
@@ -123,9 +123,20 @@ class _ToolToggle(ttk.Checkbutton):
 # ---------------------------------------------------------------------- 主視窗
 
 
-class App:
-    def __init__(self, root: tk.Tk, folder: str | None = None):
+class PickView(tk.Frame):
+    """APU Pick 的主畫面。可以單獨放在視窗裡（main），也可以嵌進整合版的分頁。
+
+    不碰整個視窗：標題、大小、選單列、快捷鍵、關閉詢問都由 main() 負責。
+    on_language：按下頂部列的語言切換時呼叫（由外面換語言、重建 View 與選單列）；沒給就自己換語言並 rebuild()。
+    show_language=False 時頂部列不顯示語言切換。
+    """
+
+    def __init__(self, parent: tk.Misc, root: tk.Tk, folder: str | None = None, *,
+                 on_language: Callable[[str], None] | None = None, show_language: bool = True):
+        super().__init__(parent, bg=Darkroom.canvas)
         self.root = root
+        self.on_language = on_language
+        self.show_language = show_language
         self.frames: list[FrameMetrics] = []
         self.selection: Selection | None = None
         self.worker: threading.Thread | None = None
@@ -174,14 +185,13 @@ class App:
 
         self._scale = root.winfo_fpixels("1i") / 96.0
         self.fonts = Fonts(root)
-        root.title(f"{APP_NAME} {__version__}")
-        # 螢幕放不下完整大小（例如 13 吋 MacBook Air 的 1470×956）就縮到螢幕裡
-        width = min(self.px(1320), root.winfo_screenwidth() - self.px(40))
-        height = min(self.px(900), root.winfo_screenheight() - self.px(110))
-        root.geometry(f"{width}x{height}")
-        root.minsize(self.px(1080), self.px(720))
-        root.configure(bg=Darkroom.canvas)
         self._setup_style()
+        # 這個 View 專用的事件標籤：加在自己底下每個元件上，不用 bind_all，
+        # 跟別的畫面放在同一個視窗時（整合版的分頁）不會互相搶事件
+        self._tag = f"ApuPickView{id(self)}"
+        self.bind_class(self._tag, "<Button-1>", self._maybe_close_popover, add="+")
+        self.bind_class(self._tag, "<Escape>", lambda _e: self.close_popover())
+        self.bind_class(self._tag, "<MouseWheel>", self._scroll_panel, add="+")
         self._build()
         for var in (self.method_var, self.pass_var, self.min_score_var, self.keep_best_var,
                     self.group_filter_var, self.group_exposure_var, self.group_night_var,
@@ -192,17 +202,9 @@ class App:
         self.only_reject_var.trace_add("write", lambda *_: self._fill_table())
         self.watch_var.trace_add("write", lambda *_: self._toggle_watch())
         # 延到事件處理完再換：換語言會重建介面，包含正在處理點擊的那個切換鈕
-        self.lang_var.trace_add("write", lambda *_: root.after_idle(self._change_language))
-        if not IS_MAC:  # Mac 的 ⌘O 在選單列（_build_menubar）
-            root.bind_all("<Control-o>", lambda _e: self._browse_folder())
-        root.bind_all("<Button-1>", self._maybe_close_popover, add="+")
-        root.bind_all("<Escape>", lambda _e: self.close_popover())
-        root.bind_all("<MouseWheel>", self._scroll_panel, add="+")
-        root.protocol("WM_DELETE_WINDOW", self._on_close)
-        if IS_MAC:  # Command+Q 跟按紅色關閉鈕一樣：量測中要先問；Tk 預設是直接結束程式
-            root.createcommand("::tk::mac::Quit", self._on_close)
+        self.lang_var.trace_add("write", lambda *_: self.after_idle(self._language_clicked))
         self._refresh_all()
-        self._poll_job: str | None = root.after(100, self._poll)
+        self._poll_job: str | None = self.after(100, self._poll)
         if folder:
             self._set_folder(Path(folder))
 
@@ -218,59 +220,51 @@ class App:
         # 趨勢圖工具列的圖示按鈕：平的，滑過去才有底色，切換鈕按下去維持亮一階
         tool_colors = [("disabled", D.chrome), ("pressed", D.segment_on), ("selected", D.segment_on),
                        ("active", D.hover)]
-        for name in ("Tool.TButton", "Tool.Toolbutton"):
+        for name in ("Pick.Tool.TButton", "Pick.Tool.Toolbutton"):
             style.configure(name, background=D.chrome, bordercolor=D.chrome, lightcolor=D.chrome,
                             darkcolor=D.chrome, focuscolor=D.chrome, relief="flat", padding=self.px(3))
             style.map(name, background=tool_colors, bordercolor=tool_colors, lightcolor=tool_colors,
                       darkcolor=tool_colors)
 
     def _build(self) -> None:
-        if IS_MAC:
-            self._build_menubar()
         self._build_top_bar()
         self._build_status_bar()
-        body = tk.Frame(self.root, bg=Darkroom.canvas)
+        body = tk.Frame(self, bg=Darkroom.canvas)
         body.pack(fill="both", expand=True)
         self._build_panel(body)
         tk.Frame(body, bg=Darkroom.separator, width=1).pack(side="right", fill="y")
         self._build_canvas_area(body)
+        self._tag_widgets(self)
 
-    def _build_menubar(self) -> None:
-        """Mac 的選單列，換掉 Tk 預設的英文選單。
-
-        Mac 的快捷鍵慣例是放在選單項目上（⌘O 開啟資料夾）。
-        「關於」顯示系統的關於視窗（版本、圖示取自 Info.plist）；隱藏、結束由系統提供。
-        """
-        root = self.root
-        menubar = tk.Menu(root)
-        app_menu = tk.Menu(menubar, name="apple", tearoff=False)
-        app_menu.add_command(label=tr("gui.menu.about"),
-                             command=lambda: root.tk.call("::tk::mac::standardAboutPanel"))
-        app_menu.add_separator()
-        menubar.add_cascade(menu=app_menu)
-        file_menu = tk.Menu(menubar, tearoff=False)
-        file_menu.add_command(label=tr("gui.menu.open"), accelerator="Command-O", command=self._browse_folder)
-        menubar.add_cascade(label=tr("gui.menu.file"), menu=file_menu)
-        edit_menu = tk.Menu(menubar, tearoff=False)
-        edit_menu.add_command(label=tr("gui.menu.copy"), accelerator="Command-C",
-                              command=lambda: self._text_target().event_generate("<<Copy>>"))
-        edit_menu.add_command(label=tr("gui.menu.select_all"), accelerator="Command-A",
-                              command=lambda: self._text_target().event_generate("<<SelectAll>>"))
-        menubar.add_cascade(label=tr("gui.menu.edit"), menu=edit_menu)
-        menubar.add_cascade(label=tr("gui.menu.window"), menu=tk.Menu(menubar, name="window"))
-        root.configure(menu=menubar)
+    def _tag_widgets(self, widget: tk.Misc) -> None:
+        """把這個 View 的事件標籤加到自己和底下每個元件（放在 'all' 之前；重建介面後要再做一次）。"""
+        tags = list(widget.bindtags())
+        if self._tag not in tags:
+            tags.insert(max(0, len(tags) - 1), self._tag)
+            widget.bindtags(tuple(tags))
+        for child in widget.winfo_children():
+            if not isinstance(child, tk.Toplevel):
+                self._tag_widgets(child)
 
     def _text_target(self) -> tk.Misc:
         """拷貝、全選的對象：門檻細節的文字是唯讀的，點了不會拿到焦點，所以沒有焦點時就是它。"""
         widget = self.root.focus_get()
-        return widget if isinstance(widget, tk.Text) else self.summary_text
+        return widget if isinstance(widget, tk.Text) and str(widget).startswith(str(self)) else self.summary_text
+
+    def copy(self) -> None:
+        """選單「編輯 → 拷貝」。"""
+        self._text_target().event_generate("<<Copy>>")
+
+    def select_all(self) -> None:
+        """選單「編輯 → 全選」。"""
+        self._text_target().event_generate("<<SelectAll>>")
 
     def _build_top_bar(self) -> None:
         D = Darkroom
-        bar = tk.Frame(self.root, bg=D.chrome, height=self.px(D.top_bar_height))
+        bar = tk.Frame(self, bg=D.chrome, height=self.px(D.top_bar_height))
         bar.pack(fill="x")
         bar.pack_propagate(False)
-        tk.Frame(self.root, bg=D.separator, height=1).pack(fill="x")
+        tk.Frame(self, bg=D.separator, height=1).pack(fill="x")
 
         identity = tk.Frame(bar, bg=D.chrome)
         identity.pack(side="left", padx=(self.px(14), 0))
@@ -282,8 +276,9 @@ class App:
 
         actions = tk.Frame(bar, bg=D.chrome)
         actions.pack(side="right", padx=(0, self.px(14)))
-        Segmented(actions, self, [("zh", "繁中"), ("en", "EN")], self.lang_var).pack(side="left")
-        tk.Frame(actions, bg=D.separator, width=1, height=self.px(18)).pack(side="left", padx=self.px(10))
+        if self.show_language:
+            Segmented(actions, self, [("zh", "繁中"), ("en", "EN")], self.lang_var).pack(side="left")
+            tk.Frame(actions, bg=D.separator, width=1, height=self.px(18)).pack(side="left", padx=self.px(10))
         self.open_btn = ttk.Button(actions, text=tr("gui.btn.open"), style="Dark.TButton",
                                    command=self._browse_folder)
         self.open_btn.pack(side="left")
@@ -301,10 +296,10 @@ class App:
 
     def _build_status_bar(self) -> None:
         D = Darkroom
-        bar = tk.Frame(self.root, bg=D.chrome, height=self.px(D.status_bar_height))
+        bar = tk.Frame(self, bg=D.chrome, height=self.px(D.status_bar_height))
         bar.pack(side="bottom", fill="x")
         bar.pack_propagate(False)
-        tk.Frame(self.root, bg=D.separator, height=1).pack(side="bottom", fill="x")
+        tk.Frame(self, bg=D.separator, height=1).pack(side="bottom", fill="x")
         self.indicator = tk.Frame(bar, bg=D.chrome)
         self.indicator.pack(side="left", padx=(self.px(14), 0))
         self.status_dot = tk.Canvas(self.indicator, width=self.px(7), height=self.px(7), bg=D.chrome,
@@ -459,7 +454,7 @@ class App:
             btn.pack(side="right", padx=(self.px(6), 0))
             Tooltip(btn, tr("gui.override.help", shortcut=MULTI_SELECT_KEY), self)
             self.override_btns.append(btn)
-        self.row_menu = tk.Menu(self.root, tearoff=False, bg=D.group_header, fg=D.label,
+        self.row_menu = tk.Menu(self, tearoff=False, bg=D.group_header, fg=D.label,
                                 activebackground=D.prominent, activeforeground="white", bd=0)
         for key, choice in (("gui.btn.force_keep", "keep"), ("gui.btn.force_reject", "reject"),
                             ("gui.btn.clear_override", None)):
@@ -533,8 +528,8 @@ class App:
 
     def _schedule_preview(self) -> None:
         if self._preview_job is not None:
-            self.root.after_cancel(self._preview_job)
-        self._preview_job = self.root.after(120, self._load_preview)
+            self.after_cancel(self._preview_job)
+        self._preview_job = self.after(120, self._load_preview)
 
     def _current_path(self, name: str) -> Path | None:
         """這張片現在在哪：還在 light 資料夾，或已經被搬到淘汰片資料夾。"""
@@ -651,28 +646,33 @@ class App:
     def _set_language(self, lang: str) -> None:
         self.lang_var.set(lang)
 
-    def _change_language(self) -> None:
+    def _language_clicked(self) -> None:
         lang = self.lang_var.get()
         if lang not in LANGUAGES or lang == get_language():
             return
-        if self._busy():  # 量測中不換：重建介面會打斷進度顯示
+        if self.is_busy():  # 量測中不換：重建介面會打斷進度顯示
             self.lang_var.set(get_language())
             return
-        set_language(lang)
-        save_settings(language=lang)
-        self._rebuild()
+        if self.on_language is not None:
+            self.on_language(lang)
+        else:
+            set_language(lang)
+            save_settings(language=lang)
+            self.rebuild()
 
-    def _rebuild(self) -> None:
-        """換語言：整個重建介面，已經量好的結果、設定都保留。"""
+    def rebuild(self) -> None:
+        """照目前語言重建自己的介面，已經量好的結果、設定都保留。"""
+        if self.lang_var.get() != get_language():
+            self.lang_var.set(get_language())
         self.close_popover()
-        for child in self.root.winfo_children():
+        for child in self.winfo_children():
             child.destroy()
         self._build()
         if self.frames:
             self._apply()
         self._refresh_all()
         # Mac：在已經顯示的視窗裡重建，Canvas 裡的面板要等整個畫面排完再排一次才會畫出來，不然整片空白
-        self.root.update_idletasks()
+        self.update_idletasks()
         self._relayout_panel()
 
     # ------------------------------------------------------------------ 狀態
@@ -692,7 +692,8 @@ class App:
             return Path(text)
         return folder / REJECT_DIR_NAME if folder else None
 
-    def _busy(self) -> bool:
+    def is_busy(self) -> bool:
+        """有量測在跑（關閉視窗前要詢問）。"""
         return self.worker is not None and self.worker.is_alive()
 
     def _refresh_all(self) -> None:
@@ -704,7 +705,7 @@ class App:
         self._update_result_view()
 
     def _update_buttons(self) -> None:
-        busy = self._busy()
+        busy = self.is_busy()
         folder = self._folder()
         has_folder = folder is not None and folder.is_dir()
         idle = "disabled" if busy else "!disabled"
@@ -797,7 +798,7 @@ class App:
     # ------------------------------------------------------------------ 資料夾
 
     def _browse_folder(self) -> None:
-        if self._busy():
+        if self.is_busy():
             return
         initial = self._folder()
         path = filedialog.askdirectory(title=tr("gui.pick_folder"),
@@ -810,6 +811,14 @@ class App:
         if path:
             self.reject_var.set(str(Path(path)))
             self._update_buttons()
+
+    def open_folder(self, path: str | Path) -> None:
+        """開檔入口：開啟放 light frames 的資料夾（拖一張影像進來也行）。"""
+        self._set_folder(Path(path))
+
+    def ask_open(self) -> None:
+        """選單「開啟資料夾…」與快捷鍵：跳出選資料夾的對話框。"""
+        self._browse_folder()
 
     def _set_folder(self, folder: Path) -> None:
         if folder.is_file() and is_image(folder):
@@ -858,7 +867,7 @@ class App:
     # ------------------------------------------------------------------ 量測
 
     def _measure_or_stop(self) -> None:
-        if self._busy():
+        if self.is_busy():
             self._stop()
         else:
             self._start_measure()
@@ -914,26 +923,26 @@ class App:
 
     def _toggle_watch(self) -> None:
         if self._watch_job is not None:
-            self.root.after_cancel(self._watch_job)
+            self.after_cancel(self._watch_job)
             self._watch_job = None
         self._watch_sizes = {}
         if self.watch_var.get():
             n = len(self.frames)
             self._status(lambda: tr("gui.status.watching", n=n))
             self._watch_tick()
-        elif not self._busy():
+        elif not self.is_busy():
             self._status(lambda: tr("gui.status.watch_off"))
 
     def _watch_tick(self) -> None:
         """檢查一次資料夾。新檔案的大小要連續兩次一樣（相機軟體寫完了）才量測。"""
         if self._watch_job is not None:
-            self.root.after_cancel(self._watch_job)
+            self.after_cancel(self._watch_job)
         self._watch_job = None
         if not self.watch_var.get():
             return
-        self._watch_job = self.root.after(self.WATCH_INTERVAL_MS, self._watch_tick)
+        self._watch_job = self.after(self.WATCH_INTERVAL_MS, self._watch_tick)
         folder, reject_dir = self._folder(), self._reject_dir()
-        if self._busy() or folder is None or reject_dir is None or not folder.is_dir():
+        if self.is_busy() or folder is None or reject_dir is None or not folder.is_dir():
             return
         files, home_of = collect_files(folder, reject_dir)
         known = {Path(f.file).name for f in self.frames}
@@ -960,7 +969,7 @@ class App:
                 self._handle(self.events.get_nowait())
         except queue.Empty:
             pass
-        self._poll_job = self.root.after(100, self._poll)
+        self._poll_job = self.after(100, self._poll)
 
     @staticmethod
     def _progress_text(i: int, n: int, eta: float, name: str) -> str:
@@ -1038,9 +1047,9 @@ class App:
     def _schedule_apply(self) -> None:
         self._update_method_state()
         if self._apply_job is not None:
-            self.root.after_cancel(self._apply_job)
+            self.after_cancel(self._apply_job)
         # 跟 APU Astro 一樣，停止操作約 0.3 秒後才更新結果
-        self._apply_job = self.root.after(300, self._apply)
+        self._apply_job = self.after(300, self._apply)
 
     def _config(self) -> ScoreConfig | None:
         """讀介面上的門檻設定；數字不合理時回傳 None。"""
@@ -1256,29 +1265,43 @@ class App:
             return
         self._status(lambda: tr("gui.restore.done", n=restored))
 
-    def _on_close(self) -> None:
-        if self._busy():
-            if not messagebox.askyesno(APP_NAME, tr("gui.close.confirm")):
-                return
-            self.cancel.set()
-        self.close()
-        self.root.destroy()
-
     def close(self) -> None:
-        """停掉計時器、解除全域綁定、清掉畫面；之後 root 可以直接關掉，或拿來開新的 App。"""
+        """取消背景工作、停掉排程。呼叫端接著 destroy() 這個 View；整合版關掉分頁後請在主執行緒 gc.collect()，
+        不然 View 的 Tk 變數可能在背景執行緒被 Python 的循環回收釋放（tkinter 會忽略，但不乾淨）。"""
         self.cancel.set()
         for job in (self._poll_job, self._apply_job, self._watch_job, self._preview_job):
             if job is not None:
                 try:
-                    self.root.after_cancel(job)
+                    self.after_cancel(job)
                 except tk.TclError:
                     pass
         self._poll_job = self._apply_job = self._watch_job = self._preview_job = None
         self.close_popover()
-        for sequence in ("<Control-o>", "<Button-1>", "<Escape>", "<MouseWheel>"):
-            self.root.unbind_all(sequence)
-        for child in self.root.winfo_children():
-            child.destroy()
+
+
+# ---------------------------------------------------------------------- 視窗
+
+
+def _build_menubar(root: tk.Tk, view: PickView) -> None:
+    """Mac 的選單列，換掉 Tk 預設的英文選單；換語言時要重建一次。
+
+    Mac 的快捷鍵慣例是放在選單項目上（⌘O 開啟資料夾）。
+    「關於」顯示系統的關於視窗（版本、圖示取自 Info.plist）；隱藏、結束由系統提供。
+    """
+    menubar = tk.Menu(root)
+    app_menu = tk.Menu(menubar, name="apple", tearoff=False)
+    app_menu.add_command(label=tr("gui.menu.about"), command=lambda: root.tk.call("::tk::mac::standardAboutPanel"))
+    app_menu.add_separator()
+    menubar.add_cascade(menu=app_menu)
+    file_menu = tk.Menu(menubar, tearoff=False)
+    file_menu.add_command(label=tr("gui.menu.open"), accelerator="Command-O", command=view.ask_open)
+    menubar.add_cascade(label=tr("gui.menu.file"), menu=file_menu)
+    edit_menu = tk.Menu(menubar, tearoff=False)
+    edit_menu.add_command(label=tr("gui.menu.copy"), accelerator="Command-C", command=view.copy)
+    edit_menu.add_command(label=tr("gui.menu.select_all"), accelerator="Command-A", command=view.select_all)
+    menubar.add_cascade(label=tr("gui.menu.edit"), menu=edit_menu)
+    menubar.add_cascade(label=tr("gui.menu.window"), menu=tk.Menu(menubar, name="window"))
+    root.configure(menu=menubar)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1301,7 +1324,39 @@ def main(argv: list[str] | None = None) -> int:
             root.iconbitmap(default=str(ICON))
         except tk.TclError:
             pass
-    App(root, argv[0] if argv else None)
+    scale = root.winfo_fpixels("1i") / 96.0
+    # 螢幕放不下完整大小（例如 13 吋 MacBook Air 的 1470×956）就縮到螢幕裡
+    width = min(int(1320 * scale), root.winfo_screenwidth() - int(40 * scale))
+    height = min(int(900 * scale), root.winfo_screenheight() - int(110 * scale))
+    root.geometry(f"{width}x{height}")
+    root.minsize(int(1080 * scale), int(720 * scale))
+    root.configure(bg=Darkroom.canvas)
+    root.title(f"{APP_NAME} {__version__}")
+
+    def change_language(lang: str) -> None:
+        set_language(lang)
+        save_settings(language=lang)
+        view.rebuild()
+        if IS_MAC:
+            _build_menubar(root, view)  # 選單文字跟著換
+
+    view = PickView(root, root, argv[0] if argv else None, on_language=change_language)
+    view.pack(fill="both", expand=True)
+    if IS_MAC:
+        _build_menubar(root, view)
+    else:  # Mac 的 ⌘O 在選單列
+        root.bind_all("<Control-o>", lambda _e: view.ask_open())
+
+    def on_close() -> None:
+        if view.is_busy() and not messagebox.askyesno(APP_NAME, tr("gui.close.confirm")):
+            return
+        view.close()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
+    if IS_MAC:  # ⌘Q 跟按紅色關閉鈕一樣：量測中要先問；Tk 預設是直接結束程式
+        root.createcommand("::tk::mac::Quit", on_close)
+        root.createcommand("::tk::mac::OpenDocument", lambda *paths: paths and view.open_folder(paths[0]))
     dark_title_bar(root)
     root.mainloop()
     return 0

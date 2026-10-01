@@ -7,7 +7,8 @@ import os
 import sys
 from pathlib import Path
 
-from .i18n import APP_NAME
+# 設定資料夾的名稱（畫面上顯示的名稱在 i18n.APP_NAME）；整合版會改成 APU Astro 底下的一個區段
+APP_NAME = "APU Pick"
 
 
 def config_dir() -> Path:
