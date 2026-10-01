@@ -29,12 +29,12 @@ from .darkroom import (IS_MAC, Darkroom, Fonts, MetricRow, PanelGroup, Parameter
 from .grouping import EXPOSURE_TOLERANCE
 from .i18n import APP_NAME, APP_SUBTITLE, LANGUAGES, get_language, set_language, tr, tr_metric
 from .metrics import FrameMetrics, is_image
-from .mover import read_move_log, restore_rejected, sync_files
-from .pipeline import (REJECT_DIR_NAME, REPORT_NAME, Cancelled, Selection, collect_files, decide,
-                       measure_files)
+from .mover import read_move_log
+from .pipeline import (REJECT_DIR_NAME, REPORT_NAME, Cancelled, Selection, collect_files, decide, frame_key,
+                       measure_files, move_files, restore_files, should_recurse)
 from .plot import draw_decisions
 from .preview import Preview, closeup, make_preview, thumbnail
-from .report import read_csv, read_overrides, score_summary_lines, write_csv
+from .report import has_subfolders, read_csv, read_overrides, score_summary_lines, write_csv
 from .scoring import DEFAULT_WEIGHTS, METRICS, ScoreConfig
 from .settings import load_settings, save_settings
 
@@ -50,6 +50,7 @@ MULTI_SELECT_KEY = "⌘" if IS_MAC else "Ctrl"
 # 清單欄位：(key, 標題的翻譯代號, 寬度 px, 對齊)
 COLUMNS = [
     ("file", "gui.col.file", 330, "w"),
+    ("folder", "gui.col.folder", 160, "w"),  # 只在包含子資料夾時顯示
     ("result", "gui.col.result", 60, "center"),
     ("score", "gui.col.score", 55, "e"),
     ("fwhm", "gui.col.fwhm", 55, "e"),
@@ -158,6 +159,11 @@ class PickView(tk.Frame):
         self.group_filter_var = tk.BooleanVar(value=True)
         self.group_exposure_var = tk.BooleanVar(value=True)
         self.group_night_var = tk.BooleanVar(value=False)
+        self.group_gain_var = tk.BooleanVar(value=True)
+        self.group_folder_var = tk.BooleanVar(value=False)
+        # 包含子資料夾：開資料夾時自動判斷（本身沒影像、子資料夾有；或上次的報表有子資料夾），也可以自己切換
+        self.recursive_var = tk.BooleanVar(value=False)
+        self._setting_folder = False
         self.exposure_tol_var = tk.DoubleVar(value=float(load_settings().get("exposure_tolerance", EXPOSURE_TOLERANCE)))
         self.workers_var = tk.IntVar(value=default_workers())
         # 監看資料夾：拍攝時定時檢查，新檔案寫完就量測；每次開資料夾都從關閉開始
@@ -195,8 +201,10 @@ class PickView(tk.Frame):
         self._build()
         for var in (self.method_var, self.pass_var, self.min_score_var, self.keep_best_var,
                     self.group_filter_var, self.group_exposure_var, self.group_night_var,
+                    self.group_gain_var, self.group_folder_var,
                     self.exposure_tol_var, *self.weight_vars.values()):
             var.trace_add("write", lambda *_: self._schedule_apply())
+        self.recursive_var.trace_add("write", lambda *_: self._recursive_changed())
         for var in self.weight_vars.values():
             var.trace_add("write", lambda *_: self._update_weight_view())
         self.only_reject_var.trace_add("write", lambda *_: self._fill_table())
@@ -375,7 +383,8 @@ class PickView(tk.Frame):
 
         group = PanelGroup(panel, self, "grouping", tr("gui.group.grouping"), tr("gui.group.grouping.info"))
         for key, var in (("filter", self.group_filter_var), ("exposure", self.group_exposure_var),
-                         ("night", self.group_night_var)):
+                         ("gain", self.group_gain_var), ("night", self.group_night_var),
+                         ("folder", self.group_folder_var)):
             ParameterToggle(group.body, self, tr(f"gui.toggle.{key}"), var).pack(fill="x", pady=self.px(2))
         ParameterSlider(group.body, self, tr("gui.slider.exposure_tolerance"), self.exposure_tol_var, 0, 30,
                         lambda v: tr("gui.value.seconds", v=v)).pack(fill="x", pady=(self.px(6), 0))
@@ -383,11 +392,12 @@ class PickView(tk.Frame):
         group = PanelGroup(panel, self, "measure", tr("gui.group.measure"), tr("gui.group.measure.info"))
         ParameterSlider(group.body, self, tr("gui.slider.workers"), self.workers_var, 1,
                         max(2, os.cpu_count() or 2), lambda v: f"{v:.0f}").pack(fill="x")
-        ParameterToggle(group.body, self, tr("gui.toggle.watch"), self.watch_var).pack(fill="x", pady=(self.px(6), 0))
+        ParameterToggle(group.body, self, tr("gui.toggle.recursive"), self.recursive_var).pack(
+            fill="x", pady=(self.px(6), 0))
+        ParameterToggle(group.body, self, tr("gui.toggle.watch"), self.watch_var).pack(fill="x", pady=(self.px(2), 0))
         self.load_btn = ttk.Button(group.body, text=tr("gui.btn.load"), style="Dark.TButton",
                                    command=self._load_report)
         self.load_btn.pack(anchor="w", pady=(self.px(10), 0))
-
         group = PanelGroup(panel, self, "rejects", tr("gui.group.rejects"), tr("gui.group.rejects.info"))
         tk.Label(group.body, text=tr("gui.reject_folder"), font=self.fonts.small, fg=D.secondary,
                  bg=D.panel).pack(anchor="w")
@@ -531,14 +541,15 @@ class PickView(tk.Frame):
             self.after_cancel(self._preview_job)
         self._preview_job = self.after(120, self._load_preview)
 
-    def _current_path(self, name: str) -> Path | None:
-        """這張片現在在哪：還在 light 資料夾，或已經被搬到淘汰片資料夾。"""
-        folder, reject_dir = self._folder(), self._reject_dir()
+    def _current_path(self, key: str) -> Path | None:
+        """這張片（key 是相對於開啟資料夾的路徑）現在在哪：還在 light 資料夾，或已經被搬到淘汰片資料夾。"""
+        folder = self._folder()
         if folder is None:
             return None
-        home = folder / name
+        home = folder / key
         if home.exists():
             return home
+        reject_dir = home.parent / REJECT_DIR_NAME if self._recursive() else self._reject_dir()
         moved = read_move_log(reject_dir) if reject_dir else {}
         target = moved.get(home.resolve())
         return target if target is not None and target.exists() else None
@@ -570,9 +581,11 @@ class PickView(tk.Frame):
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _sky_text(self, name: str) -> str:
+    def _sky_text(self, key: str) -> str:
         """拍攝當下的天空，一行字；header 沒有座標、地點時是空的。"""
-        m = next((d.metrics for d in self.selection.decisions if Path(d.metrics.file).name == name), None)             if self.selection else None
+        folder = self._folder()
+        m = next((d.metrics for d in self.selection.decisions if frame_key(d.metrics.file, folder) == key), None) \
+            if self.selection else None
         if m is None or m.altitude is None:
             return ""
         illum = (m.moon_illum or 0) * 100
@@ -692,6 +705,10 @@ class PickView(tk.Frame):
             return Path(text)
         return folder / REJECT_DIR_NAME if folder else None
 
+    def _recursive(self) -> bool:
+        """包含子資料夾：每張的淘汰片搬到自己所在資料夾的 rejected，不能自訂淘汰片資料夾。"""
+        return bool(self.recursive_var.get())
+
     def is_busy(self) -> bool:
         """有量測在跑（關閉視窗前要詢問）。"""
         return self.worker is not None and self.worker.is_alive()
@@ -720,13 +737,16 @@ class PickView(tk.Frame):
         has_report = has_folder and (folder / REPORT_NAME).is_file()
         self.load_btn.state([idle if has_report else "disabled"])
         self.restore_btn.state([idle if has_folder else "disabled"])
-        self.change_btn.state([idle if has_folder else "disabled"])
+        self.change_btn.state([idle if has_folder and not self._recursive() else "disabled"])
 
         D = Darkroom
         self.folder_title.configure(text=folder.name if folder else tr("gui.no_folder"),
                                     fg=D.label if folder else D.secondary)
         reject_dir = self._reject_dir()
-        self.reject_label.configure(text=_short_path(str(reject_dir)) if reject_dir else "—")
+        if self._recursive():
+            self.reject_label.configure(text=tr("gui.reject_each"))
+        else:
+            self.reject_label.configure(text=_short_path(str(reject_dir)) if reject_dir else "—")
         if busy:
             self.status_dot.pack_forget()
             self.progress.pack(side="left", pady=self.px(9))
@@ -820,9 +840,18 @@ class PickView(tk.Frame):
         """選單「開啟資料夾…」與快捷鍵：跳出選資料夾的對話框。"""
         self._browse_folder()
 
-    def _set_folder(self, folder: Path) -> None:
+    def _set_folder(self, folder: Path, recursive: bool | None = None) -> None:
+        """開啟資料夾。recursive=None 時自動判斷要不要包含子資料夾。"""
         if folder.is_file() and is_image(folder):
             folder = folder.parent  # 拖一張 FITS 進來也行
+        if recursive is None:
+            report = folder / REPORT_NAME
+            recursive = folder.is_dir() and (has_subfolders(report) if report.is_file() else should_recurse(folder))
+        self._setting_folder = True
+        try:
+            self.recursive_var.set(recursive)
+        finally:
+            self._setting_folder = False
         self.watch_var.set(False)  # 換資料夾就停止監看，要監看新的資料夾再自己打開
         self.folder_var.set(str(folder))
         self.reject_var.set(str(folder / REJECT_DIR_NAME))
@@ -839,10 +868,29 @@ class PickView(tk.Frame):
         elif (folder / REPORT_NAME).is_file():
             self._load_report()
         else:
-            n = len(collect_files(folder, self._reject_dir())[0])
-            self._status(lambda: tr("gui.status.found", n=n) if n else tr("gui.status.no_fits"))
+            files, home_of = collect_files(folder, self._reject_dir(), recursive)
+            n = len(files)
+            k = len({Path(home_of.get(str(p), p)).resolve().parent for p in files})
+            if recursive and n:
+                self._status(lambda: tr("gui.status.found_dirs", n=n, k=k))
+            else:
+                self._status(lambda: tr("gui.status.found", n=n) if n else tr("gui.status.no_fits"))
         self._update_result_view()
         self._update_buttons()
+
+    def _recursive_changed(self) -> None:
+        """使用者切換「包含子資料夾」：檔案範圍變了，照新的範圍重新開一次同一個資料夾。"""
+        folder = self._folder()
+        if self._setting_folder or folder is None:
+            return
+        if self.is_busy():  # 量測中不能換範圍，開關切回去
+            self._setting_folder = True
+            try:
+                self.recursive_var.set(not self._recursive())
+            finally:
+                self._setting_folder = False
+            return
+        self._set_folder(folder, self._recursive())
 
     def _load_report(self) -> None:
         folder, reject_dir = self._folder(), self._reject_dir()
@@ -850,14 +898,14 @@ class PickView(tk.Frame):
             return
         try:
             frames = read_csv(folder / REPORT_NAME, folder)
-            files, home_of = collect_files(folder, reject_dir)
+            files, home_of = collect_files(folder, reject_dir, self._recursive())
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_NAME, tr("gui.err.load", error=exc))
             return
-        now = {Path(home_of.get(str(p), p)).name for p in files}
+        now = {frame_key(home_of.get(str(p), p), folder) for p in files}
         # 已經不在資料夾（也不在淘汰片資料夾）的就不算進來，免得影響整批的統計
-        kept = [f for f in frames if Path(f.file).name in now]
-        n_new = len(now - {Path(f.file).name for f in frames})
+        kept = [f for f in frames if frame_key(f.file, folder) in now]
+        n_new = len(now - {frame_key(f.file, folder) for f in frames})
         self.frames = kept
         self._apply()
         self._status(lambda: tr("gui.status.loaded", n=len(kept))
@@ -877,7 +925,7 @@ class PickView(tk.Frame):
         if folder is None or reject_dir is None or not folder.is_dir():
             messagebox.showwarning(APP_NAME, tr("gui.warn.pick_folder"))
             return
-        files, home_of = collect_files(folder, reject_dir)
+        files, home_of = collect_files(folder, reject_dir, self._recursive())
         if not files:
             messagebox.showwarning(APP_NAME, tr("gui.status.no_fits"))
             return
@@ -944,11 +992,12 @@ class PickView(tk.Frame):
         folder, reject_dir = self._folder(), self._reject_dir()
         if self.is_busy() or folder is None or reject_dir is None or not folder.is_dir():
             return
-        files, home_of = collect_files(folder, reject_dir)
-        known = {Path(f.file).name for f in self.frames}
+        # 子資料夾模式下拍攝中新建的資料夾（例如新的一晚）也會被找到
+        files, home_of = collect_files(folder, reject_dir, self._recursive())
+        known = {frame_key(f.file, folder) for f in self.frames}
         sizes, ready = {}, []
         for p in files:
-            if Path(home_of.get(str(p), p)).name in known:
+            if frame_key(home_of.get(str(p), p), folder) in known:
                 continue
             try:
                 size = p.stat().st_size
@@ -1004,8 +1053,9 @@ class PickView(tk.Frame):
         elif kind == "watched":
             self.worker = None
             new = event[1]
-            names = {Path(m.file).name for m in new}
-            self.frames = [f for f in self.frames if Path(f.file).name not in names] + new
+            folder = self._folder()
+            keys = {frame_key(m.file, folder) for m in new}
+            self.frames = [f for f in self.frames if frame_key(f.file, folder) not in keys] + new
             self._apply()
             self._save_report()
             latest = max(new, key=lambda m: (m.date_obs or "", m.file))
@@ -1038,7 +1088,7 @@ class PickView(tk.Frame):
         folder = self._folder()
         if folder is not None and self.selection is not None:
             try:
-                write_csv(self.selection.decisions, folder / REPORT_NAME)
+                write_csv(self.selection.decisions, folder / REPORT_NAME, root=folder)
             except OSError as exc:
                 messagebox.showwarning(APP_NAME, tr("gui.warn.report_save", error=exc))
 
@@ -1074,8 +1124,12 @@ class PickView(tk.Frame):
             keys.append("filter")
         if self.group_exposure_var.get():
             keys.append("exposure")
+        if self.group_gain_var.get():
+            keys.append("gain")
         if self.group_night_var.get():
             keys.append("night")
+        if self.group_folder_var.get():
+            keys.append("folder")
         return tuple(keys)
 
     def _apply(self) -> None:
@@ -1099,7 +1153,7 @@ class PickView(tk.Frame):
             tolerance = EXPOSURE_TOLERANCE
         save_settings(exposure_tolerance=tolerance)
         self.selection = sel = decide(self.frames, self._group_keys(), "score", cfg, exposure_tolerance=tolerance,
-                                      overrides=self.overrides)
+                                      overrides=self.overrides, root=self._folder())
         n, kept = len(sel.decisions), sel.n_keep
         th = sel.thresholds
         if len(th) == 1:
@@ -1144,20 +1198,27 @@ class PickView(tk.Frame):
     def _fill_table(self) -> None:
         selected = set(self.tree.selection())
         self.tree.delete(*self.tree.get_children())
+        columns = [c[0] for c in COLUMNS]
+        if not self._recursive():
+            columns.remove("folder")
+        self.tree.configure(displaycolumns=columns)
         if self.selection is None:
             return
         rows = sorted(self.selection.decisions, key=lambda d: (d.metrics.date_obs or "", d.metrics.file))
         keep_text, reject_text = tr("term.keep"), tr("term.reject")
+        folder = self._folder()
         for d in rows:
             if self.only_reject_var.get() and d.keep:
                 continue
             m = d.metrics
-            name = Path(m.file).name
+            # 子資料夾模式下單眼的檔名常常每晚重複，清單用相對路徑當代號
+            key = frame_key(m.file, folder)
+            sub = key.rpartition("/")[0]
             result = keep_text if d.keep else reject_text
             if d.override:
                 result = f"✎ {result}"  # 手動覆寫
-            self.tree.insert("", "end", iid=name, tags=() if d.keep else ("reject",), values=(
-                name, result, _fmt(d.score, ".1f"),
+            self.tree.insert("", "end", iid=key, tags=() if d.keep else ("reject",), values=(
+                Path(m.file).name, sub, result, _fmt(d.score, ".1f"),
                 _fmt(m.fwhm, ".2f"), _fmt(m.eccentricity, ".2f"), m.n_stars, _fmt(m.background, ".0f"),
                 _fmt(m.snr, ".1f"), _fmt(m.altitude, ".0f"), _fmt(m.moon_alt, ".0f"),
                 d.group, "; ".join(str(r) for r in d.reasons)))
@@ -1186,12 +1247,7 @@ class PickView(tk.Frame):
             else:
                 self.overrides[name] = choice
         self._apply()
-        folder = self._folder()
-        if folder is not None and self.selection is not None:
-            try:
-                write_csv(self.selection.decisions, folder / REPORT_NAME)
-            except OSError as exc:
-                messagebox.showwarning(APP_NAME, tr("gui.warn.report_save", error=exc))
+        self._save_report()
 
     def _sort_by(self, key: str, toggle: bool = True) -> None:
         """點欄位標題排序，同一欄再點一次反過來；toggle=False 用在重填清單後照原本的排序。"""
@@ -1219,20 +1275,33 @@ class PickView(tk.Frame):
         sel, reject_dir, folder = self.selection, self._reject_dir(), self._folder()
         if sel is None or reject_dir is None or folder is None:
             return
-        out, back = sync_files(sel.decisions, reject_dir, dry_run=True)
+        recursive = self._recursive()
+        out, back = move_files(sel.decisions, reject_dir, recursive, dry_run=True)
         if not out and not back:
             messagebox.showinfo(APP_NAME, tr("gui.move.nothing"))
             return
         lines = []
-        if out:
+        if out and recursive:
+            # 每個資料夾各搬幾張，列出來讓使用者確認範圍對不對（例如有沒有掃到不該掃的資料夾）
+            counts: dict[str, int] = {}
+            for target in out:
+                sub = frame_key(target.parent.parent, folder)
+                counts[sub] = counts.get(sub, 0) + 1
+            shown = sorted(counts.items())[:12]
+            lines.append("\n".join([tr("gui.move.out_each", n=len(out))]
+                                   + [tr("gui.move.dir_line", dir=sub if sub != "." else tr("group.top_folder"), n=n)
+                                      for sub, n in shown]
+                                   + ([tr("gui.move.more_dirs", n=len(counts) - len(shown))]
+                                      if len(counts) > len(shown) else [])))
+        elif out:
             lines.append(tr("gui.move.out", n=len(out), dir=reject_dir))
         if back:
             lines.append(tr("gui.move.back", n=len(back)))
         if not messagebox.askyesno(APP_NAME, "\n\n".join(lines) + "\n\n" + tr("gui.move.confirm")):
             return
         try:
-            out, back = sync_files(sel.decisions, reject_dir)
-            write_csv(sel.decisions, folder / REPORT_NAME)
+            out, back = move_files(sel.decisions, reject_dir, recursive)
+            write_csv(sel.decisions, folder / REPORT_NAME, root=folder)
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_NAME, tr("gui.move.error", error=exc))
             return
@@ -1244,7 +1313,8 @@ class PickView(tk.Frame):
                 parts.append(tr("gui.move.done_out", n=n_out))
             if n_back:
                 parts.append(tr("gui.move.done_back", n=n_back))
-            return tr("gui.move.sep").join(parts) + tr("gui.move.where", dir=reject_dir)
+            where = tr("gui.move.where_each") if recursive else tr("gui.move.where", dir=reject_dir)
+            return tr("gui.move.sep").join(parts) + where
 
         self._status(text)
 
@@ -1252,14 +1322,16 @@ class PickView(tk.Frame):
         reject_dir, folder = self._reject_dir(), self._folder()
         if reject_dir is None or folder is None:
             return
-        n = len(restore_rejected(reject_dir, folder, dry_run=True))
+        recursive = self._recursive()
+        n = len(restore_files(folder, reject_dir, recursive, dry_run=True))
         if n == 0:
             messagebox.showinfo(APP_NAME, tr("gui.restore.nothing"))
             return
-        if not messagebox.askyesno(APP_NAME, tr("gui.restore.confirm", dir=reject_dir, n=n)):
+        question = tr("gui.restore.confirm_each", n=n) if recursive else tr("gui.restore.confirm", dir=reject_dir, n=n)
+        if not messagebox.askyesno(APP_NAME, question):
             return
         try:
-            restored = len(restore_rejected(reject_dir, folder))
+            restored = len(restore_files(folder, reject_dir, recursive))
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_NAME, tr("gui.restore.error", error=exc))
             return

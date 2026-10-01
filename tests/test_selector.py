@@ -503,3 +503,105 @@ def test_sky_info_is_measured_saved_and_plotted(tmp_path: Path):
     fig = Figure()
     draw_decisions(fig, decisions, dark=True)
     assert any(ax.get_ylabel().startswith(("仰角", "Altitude")) for ax in fig.axes)
+
+
+def _multi_night(root: Path) -> dict[str, dict[str, list[Path]]]:
+    """單眼常見的放法：light/iso800/每晚一個資料夾，檔名每晚重複；旁邊還有一個不該被掃進來的暗場資料夾。"""
+    nights = {name: make_session(root / "iso800" / name, n_good=6) for name in ("date_2026 0101", "date_2026 0202")}
+    (root / "iso800" / "darks").mkdir()
+    write_fits(root / "iso800" / "darks" / "dark_001.fits", make_star_field(n_stars=0, seed=7))
+    return nights
+
+
+def test_recursive_rejects_into_each_night_folder(tmp_path: Path):
+    from astro_light_selector.pipeline import should_recurse
+    from astro_light_selector.report import read_csv, read_overrides
+
+    nights = _multi_night(tmp_path)
+    assert should_recurse(tmp_path)
+    # 開的是最上層：本身沒有影像，自動包含子資料夾
+    assert main([str(tmp_path), "--workers", "2"]) == 0
+    for name, files in nights.items():
+        night = tmp_path / "iso800" / name
+        assert sorted(p.name for p in (night / "rejected").glob("*.fits")) == sorted(p.name for p in files["bad"])
+        assert all(p.exists() for p in files["good"])
+    assert (tmp_path / "iso800" / "darks" / "dark_001.fits").exists()  # 暗場資料夾沒被掃進來
+    assert not (tmp_path / "rejected").exists()
+
+    # 報表在最上層，用相對路徑分得開同名檔案
+    report = tmp_path / "selection_report.csv"
+    keys = {Path(f.file).relative_to(tmp_path).as_posix() for f in read_csv(report, tmp_path)}
+    assert "iso800/date_2026 0101/light_000.fits" in keys and "iso800/date_2026 0202/light_000.fits" in keys
+    assert len(keys) == 18
+
+    # 重跑：之前搬走的也算進同一批；手動覆寫用相對路徑認片
+    text = report.read_text(encoding="utf-8-sig").replace(
+        "iso800/date_2026 0202/bad_seeing.fits,reject", "iso800/date_2026 0202/bad_seeing.fits,keep")
+    lines = text.splitlines()
+    header = lines[0].split(",")
+    i_override, i_file = header.index("override"), header.index("file")
+    for n, line in enumerate(lines[1:], 1):
+        cells = line.split(",")
+        if cells[i_file] == "iso800/date_2026 0202/bad_seeing.fits":
+            cells[i_override] = "keep"
+            lines[n] = ",".join(cells)
+    report.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+    assert read_overrides(report) == {"iso800/date_2026 0202/bad_seeing.fits": "keep"}
+    assert main([str(tmp_path), "--from-report", str(report)]) == 0
+    assert (tmp_path / "iso800" / "date_2026 0202" / "bad_seeing.fits").exists()      # 覆寫成保留，搬回來
+    assert (tmp_path / "iso800" / "date_2026 0101" / "rejected" / "bad_seeing.fits").exists()  # 另一晚的照舊
+
+    assert main([str(tmp_path), "--restore"]) == 0
+    for files in nights.values():
+        assert all(p.exists() for p in files["good"] + files["bad"])
+
+
+def test_recursive_rejects_custom_reject_dir(tmp_path: Path):
+    _multi_night(tmp_path)
+    with pytest.raises(SystemExit):
+        main([str(tmp_path), "--recursive", "--reject-dir", str(tmp_path / "elsewhere")])
+
+
+def test_single_folder_report_keeps_plain_file_names(tmp_path: Path):
+    make_session(tmp_path, n_good=3)
+    assert main([str(tmp_path), "--dry-run"]) == 0
+    text = (tmp_path / "selection_report.csv").read_text(encoding="utf-8-sig")
+    assert "\nlight_000.fits," in text and "/" not in text.split("\n")[1].split(",")[0]
+
+
+def test_group_by_gain_and_folder(tmp_path: Path):
+    from astro_light_selector.grouping import group_frames
+    from astro_light_selector.metrics import FrameMetrics
+
+    def frame(name, iso=None, gain=None):
+        return FrameMetrics(str(tmp_path / name), 100, 3.0, 0.2, 800, 10, 20, 0, 120.0, "L", None, iso=iso, gain=gain)
+
+    groups = group_frames([frame("a/1.ARW", iso=800), frame("a/2.ARW", iso=1600), frame("b/3.ARW", iso=800)],
+                          ("filter", "exposure", "gain"))
+    assert sorted(len(v) for v in groups.values()) == [1, 2]
+    assert any("ISO 800" in label for label in groups)
+    # 增益（天文相機）一樣分開
+    assert len(group_frames([frame("1.fits", gain=100), frame("2.fits", gain=200)], ("gain",))) == 2
+    # 整批都沒有 ISO / 增益（例如舊報表）：不分、標籤也不加那一段
+    groups = group_frames([frame("1.fits"), frame("2.fits")], ("filter", "gain"))
+    assert list(groups) == ["濾鏡 L"]
+    # 依子資料夾分開
+    groups = group_frames([frame("a/1.ARW", 800), frame("a/2.ARW", 800), frame("b/1.ARW", 800)],
+                          ("folder",), root=tmp_path)
+    assert sorted(groups) == ["資料夾 a", "資料夾 b"]
+
+
+def test_night_split_needs_eight_hour_gap():
+    from astro_light_selector.grouping import assign_nights
+    from astro_light_selector.metrics import FrameMetrics
+
+    def frame(name, t):
+        return FrameMetrics(name, 100, 3.0, 0.2, 800, 10, 20, 0, 120.0, "L", t)
+
+    nights = assign_nights([
+        frame("a", "2026-01-01T20:00:00"), frame("b", "2026-01-01T23:30:00"),
+        frame("c", "2026-01-02T05:00:00"),   # 雲擋了 5.5 小時、後半夜再拍：同一晚，跨過午夜也一樣
+        frame("d", "2026-01-02T19:00:00"),   # 隔了 14 小時：下一晚
+    ])
+    assert nights["a"] == nights["b"] == nights["c"] == "2026-01-01"
+    assert nights["d"] == "2026-01-02"

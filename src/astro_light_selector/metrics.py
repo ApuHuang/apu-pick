@@ -64,6 +64,9 @@ class FrameMetrics:
     moon_alt: float | None = None      # 月亮仰角（度）
     moon_sep: float | None = None      # 月亮離目標（度）
     moon_illum: float | None = None    # 月相：被照亮的比例 0~1
+    # 0.5 新增：依 ISO／增益分組用
+    iso: float | None = None           # 相機 RAW 的 ISO
+    gain: float | None = None          # 天文相機的 GAIN
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -150,6 +153,17 @@ def _star_shape(cutout: np.ndarray, sigma0: float) -> tuple[float, float] | None
     return fwhm, ecc
 
 
+def _number(header: fits.Header, *keys: str) -> float | None:
+    for key in keys:
+        try:
+            v = float(header[key])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if v == v:
+            return v
+    return None
+
+
 def measure(path: Path) -> FrameMetrics:
     """計算單張 light frame 的品質指標。失敗時回傳帶 error 的結果。"""
     base = dict(
@@ -166,6 +180,8 @@ def measure(path: Path) -> FrameMetrics:
         exposure=header.get("EXPTIME") or header.get("EXPOSURE"),
         filter=header.get("FILTER"),
         date_obs=header.get("DATE-OBS"),
+        iso=_number(header, "ISO", "ISOSPEED"),
+        gain=_number(header, "GAIN"),
     )
     sky = sky_info(header)
     if sky is not None:

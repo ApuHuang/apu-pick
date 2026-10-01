@@ -345,3 +345,44 @@ def test_gui_watch_folder_measures_new_files(tmp_path: Path, make_app, monkeypat
 
     app.watch_var.set(False)
     assert app._watch_job is None
+
+
+def test_gui_subfolders(tmp_path: Path, make_app, dialogs):
+    nights = {name: make_session(tmp_path / "iso800" / name, n_good=4) for name in ("date_0101", "date_0202")}
+    app = make_app(tmp_path)
+    root = app.root
+    assert app.recursive_var.get()  # 最上層本身沒有影像：自動包含子資料夾
+    assert "2 個資料夾" in app.status_var.get()
+    app.workers_var.set("1")
+    app._start_measure()
+    _pump(root, lambda: app.selection is not None and not app.is_busy())
+    assert len(app.selection.decisions) == 14
+    assert "folder" in app.tree["displaycolumns"]
+    key = "iso800/date_0202/light_000.fits"  # 兩晚的檔名一樣，清單用相對路徑分開
+    assert app.tree.exists(key) and app.tree.exists("iso800/date_0101/light_000.fits")
+    assert app.tree.set(key, "folder") == "iso800/date_0202"
+
+    # 手動覆寫用相對路徑，只影響那一晚的那一張
+    app.tree.selection_set(key)
+    app._set_override("reject")
+    assert {d.metrics.file for d in app.selection.decisions if d.override} == {str(tmp_path / key)}
+
+    app._move()
+    assert "date_0101：3 張" in dialogs["asked"][-1] and "date_0202：4 張" in dialogs["asked"][-1]
+    for name, files in nights.items():
+        rejected = {p.name for p in (tmp_path / "iso800" / name / "rejected").glob("*.fits")}
+        expected = {p.name for p in files["bad"]} | ({"light_000.fits"} if name == "date_0202" else set())
+        assert rejected == expected
+    assert not (tmp_path / "rejected").exists()
+
+    # 搬走的片也看得到預覽
+    app.tree.selection_set(key)
+    _pump(root, lambda: key in app._previews)
+
+    # 重新開同一個資料夾：報表有子資料夾路徑，照樣包含子資料夾、讀回上次的結果
+    app.open_folder(tmp_path)
+    assert app.recursive_var.get() and app.selection is not None and len(app.selection.decisions) == 14
+
+    app._restore()
+    for files in nights.values():
+        assert all(p.exists() for p in files["good"] + files["bad"])

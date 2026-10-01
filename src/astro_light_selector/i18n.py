@@ -96,6 +96,11 @@ _ZH: dict[str, str] = {
     "group.no_filter": "無濾鏡",
     "group.exposure": "曝光 {value}",
     "group.night": "{value} 晚",
+    "group.iso": "ISO {value}",
+    "group.gain": "增益 {value}",
+    "group.no_gain": "ISO／增益未知",
+    "group.folder": "資料夾 {value}",
+    "group.top_folder": "最上層資料夾",
     "group.sep": "／",
     "group.all": "全部",
 
@@ -183,19 +188,29 @@ _ZH: dict[str, str] = {
     "gui.group.grouping": "分組",
     "gui.group.grouping.info": "每組各自算範本和門檻。不同濾鏡、曝光時間的背景和星點數差很多，混在一起算，"
                                "整組窄頻或短曝光的片會全部被淘汰。多晚的資料可以開「每晚分開」，每晚各自比較。"
-                               "單眼的 B 快門計時常有一兩秒誤差（例如 301、302 秒），曝光差在「曝光誤差容許」以內的算同一組。",
+                               "單眼的 B 快門計時常有一兩秒誤差（例如 301、302 秒），曝光差在「曝光誤差容許」以內的算同一組。\n\n"
+                               "依 ISO／增益分開：單眼看 ISO、天文相機看增益（GAIN），不同 ISO 的背景和雜訊差很多。"
+                               "每晚分開是看拍攝時間：相鄰兩張隔超過 8 小時算不同晚，跨過午夜沒關係。"
+                               "依子資料夾分開：用「包含子資料夾」一次處理多個資料夾時（例如每晚一個資料夾），"
+                               "每個資料夾各自比較；關閉時整批一起比。",
     "gui.toggle.filter": "依濾鏡分開",
     "gui.toggle.exposure": "依曝光時間分開",
     "gui.toggle.night": "每晚分開",
+    "gui.toggle.gain": "依 ISO／增益分開",
+    "gui.toggle.folder": "依子資料夾分開",
     "gui.slider.exposure_tolerance": "曝光誤差容許",
     "gui.value.seconds": "{v:.0f} 秒",
     "gui.group.measure": "量測",
     "gui.group.measure.info": "平行處理數越大越快，但也越吃記憶體，電腦變卡就調低。"
                               "量完的結果會存成資料夾裡的 selection_report.csv，下次開同一個資料夾會自動讀取。\n\n"
                               "監看資料夾：拍攝時打開，每 10 秒檢查一次，新檔案寫完就自動量測、加進結果，"
-                              "門檻跟著整批重算。只量測不搬檔，搬檔還是要自己按。",
+                              "門檻跟著整批重算。只量測不搬檔，搬檔還是要自己按。\n\n"
+                              "包含子資料夾：一次處理底下所有子資料夾的影像（例如 light／iso800／每晚一個資料夾），"
+                              "淘汰片搬到各自資料夾裡的 rejected。開啟的資料夾本身沒有影像、子資料夾有時會自動打開。"
+                              "名稱含 dark、flat、bias、master、calibrated 的資料夾會跳過。",
     "gui.slider.workers": "平行處理數",
     "gui.toggle.watch": "監看資料夾",
+    "gui.toggle.recursive": "包含子資料夾",
     "gui.status.watching": "監看中：共 {n} 張，有新檔案會自動量測",
     "gui.status.watch_measuring": "監看中：量測 {n} 張新檔案…",
     "gui.status.watch_added": "監看中：新增 {n} 張，最新是 {name}，共 {total} 張",
@@ -205,6 +220,7 @@ _ZH: dict[str, str] = {
                               "用 PixInsight WBPP 的「+ Directory」加入整個 light 資料夾時，子資料夾也會被加進去，"
                               "可以把這裡改到 light 資料夾外面。",
     "gui.reject_folder": "淘汰片資料夾",
+    "gui.reject_each": "各資料夾裡的 rejected",
     "gui.tab.plot": "趨勢圖",
     "gui.tab.list": "清單",
     "gui.tab.details": "門檻細節",
@@ -222,6 +238,7 @@ _ZH: dict[str, str] = {
     "gui.preview.sky_moon_up": "目標仰角 {alt:.0f}°｜月亮仰角 {moon:.0f}°，照亮 {illum:.0f}%，離目標 {sep:.0f}°",
     "gui.preview.sky_moon_down": "目標仰角 {alt:.0f}°｜月亮在地平線下（照亮 {illum:.0f}%）",
     "gui.col.file": "檔名",
+    "gui.col.folder": "資料夾",
     "gui.col.result": "結果",
     "gui.col.score": "分數",
     "gui.col.fwhm": "FWHM",
@@ -238,6 +255,7 @@ _ZH: dict[str, str] = {
     "gui.status.start": "按「開啟」選擇放 light frames 的資料夾",
     "gui.status.no_folder": "找不到資料夾：{folder}",
     "gui.status.found": "資料夾裡有 {n} 張 FITS，按「量測」開始",
+    "gui.status.found_dirs": "{k} 個資料夾裡共有 {n} 張影像，按「量測」開始",
     "gui.status.no_fits": "這個資料夾裡沒有 FITS 檔案",
     "gui.status.loaded": "已讀取上次的量測結果（{n} 張），調門檻會即時更新",
     "gui.status.loaded_new": "。注意：有 {n} 張新檔案不在上次結果裡，建議按「重新量測」",
@@ -262,6 +280,10 @@ _ZH: dict[str, str] = {
     "gui.summary.groups": "，{g} 組各自算門檻",
     "gui.move.nothing": "檔案位置已經跟目前的結果一致，不用搬。",
     "gui.move.out": "把 {n} 張淘汰片搬到：\n{dir}",
+    "gui.move.out_each": "把 {n} 張淘汰片搬到各自資料夾裡的 rejected：",
+    "gui.move.dir_line": "{dir}：{n} 張",
+    "gui.move.more_dirs": "…還有 {n} 個資料夾",
+    "gui.move.where_each": "（各資料夾裡的 rejected）",
     "gui.move.back": "把 {n} 張之前淘汰、現在變成保留的搬回原位",
     "gui.move.confirm": "確定要搬嗎？之後可以用「全部還原」搬回來。",
     "gui.move.error": "搬移時發生錯誤：\n{error}\n\n已經搬好的有記錄，可以用「全部還原」搬回。",
@@ -271,6 +293,7 @@ _ZH: dict[str, str] = {
     "gui.move.where": "（{dir}）",
     "gui.restore.nothing": "淘汰片資料夾裡沒有可以搬回的檔案。",
     "gui.restore.confirm": "把 {dir} 裡的 {n} 張 FITS 全部搬回原位？\n（手動放進去的也會一起搬回 light 資料夾）",
+    "gui.restore.confirm_each": "把各資料夾裡 rejected 的 {n} 張全部搬回原位？\n（手動放進去的也會一起搬回所在的資料夾）",
     "gui.restore.error": "搬回時發生錯誤：\n{error}",
     "gui.restore.done": "已搬回 {n} 張",
     "gui.close.confirm": "還在量測中，確定要關閉嗎？",
@@ -308,6 +331,11 @@ _EN: dict[str, str] = {
     "group.no_filter": "No filter",
     "group.exposure": "{value} exposure",
     "group.night": "Night of {value}",
+    "group.iso": "ISO {value}",
+    "group.gain": "Gain {value}",
+    "group.no_gain": "Unknown ISO / gain",
+    "group.folder": "Folder {value}",
+    "group.top_folder": "Top folder",
     "group.sep": " / ",
     "group.all": "All frames",
 
@@ -402,10 +430,17 @@ _EN: dict[str, str] = {
                                "a lot in background and star count; scored together, a whole narrowband or short-exposure "
                                "set would be rejected. For several nights, turn on By Night to compare each night separately. "
                                "Camera bulb timing is often off by a second or two (301 s vs 302 s); exposures within "
-                               "Exposure Tolerance of each other count as one group.",
+                               "Exposure Tolerance of each other count as one group.\n\n"
+                               "By ISO / Gain: ISO for cameras, GAIN for astronomy cameras; background and noise differ "
+                               "a lot between ISO settings. By Night looks at capture times: a gap of more than 8 hours "
+                               "between frames starts a new night, so crossing midnight is fine. By Subfolder: with "
+                               "Include Subfolders (for example one folder per night), each folder is compared on its "
+                               "own; when off, everything is compared together.",
     "gui.toggle.filter": "By Filter",
     "gui.toggle.exposure": "By Exposure",
     "gui.toggle.night": "By Night",
+    "gui.toggle.gain": "By ISO / Gain",
+    "gui.toggle.folder": "By Subfolder",
     "gui.slider.exposure_tolerance": "Exposure Tolerance",
     "gui.value.seconds": "{v:.0f} s",
     "gui.group.measure": "Measurement",
@@ -414,9 +449,14 @@ _EN: dict[str, str] = {
                               "Watch Folder: turn it on while shooting. The folder is checked every 10 seconds; "
                               "new files are measured once they finish writing and added to the results, "
                               "and thresholds are recalculated for the whole set. It only measures; "
-                              "moving files is still up to you.",
+                              "moving files is still up to you.\n\n"
+                              "Include Subfolders: handle the images in every subfolder at once (for example "
+                              "light / iso800 / one folder per night); rejected frames go to the rejected folder inside "
+                              "their own folder. It turns on by itself when the folder you open has no images but its "
+                              "subfolders do. Folders named dark, flat, bias, master or calibrated are skipped.",
     "gui.slider.workers": "Parallel Workers",
     "gui.toggle.watch": "Watch Folder",
+    "gui.toggle.recursive": "Include Subfolders",
     "gui.status.watching": "Watching: {n} frames. New files will be measured automatically.",
     "gui.status.watch_measuring": "Watching: measuring {n} new files…",
     "gui.status.watch_added": "Watching: added {n}, latest {name}, {total} frames in total",
@@ -426,6 +466,7 @@ _EN: dict[str, str] = {
                               "PixInsight WBPP's “+ Directory” also adds subfolders of the light folder, "
                               "so you may want this folder outside the light folder.",
     "gui.reject_folder": "Reject folder",
+    "gui.reject_each": "The rejected folder inside each folder",
     "gui.tab.plot": "Trends",
     "gui.tab.list": "Frames",
     "gui.tab.details": "Threshold Details",
@@ -444,6 +485,7 @@ _EN: dict[str, str] = {
     "gui.preview.sky_moon_up": "Target altitude {alt:.0f}° | Moon {moon:.0f}° up, {illum:.0f}% lit, {sep:.0f}° away",
     "gui.preview.sky_moon_down": "Target altitude {alt:.0f}° | Moon below horizon ({illum:.0f}% lit)",
     "gui.col.file": "File",
+    "gui.col.folder": "Folder",
     "gui.col.result": "Result",
     "gui.col.score": "Score",
     "gui.col.fwhm": "FWHM",
@@ -460,6 +502,7 @@ _EN: dict[str, str] = {
     "gui.status.start": "Click “Open” to choose a folder of light frames",
     "gui.status.no_folder": "Folder not found: {folder}",
     "gui.status.found": "Found {n} FITS files. Click “Measure” to start.",
+    "gui.status.found_dirs": "Found {n} images in {k} folders. Click “Measure” to start.",
     "gui.status.no_fits": "No FITS files in this folder",
     "gui.status.loaded": "Loaded last results ({n} frames). Threshold changes update instantly.",
     "gui.status.loaded_new": " Note: {n} new files aren't in the last results. Consider measuring again.",
@@ -484,6 +527,10 @@ _EN: dict[str, str] = {
     "gui.summary.groups": ", separate thresholds for {g} groups",
     "gui.move.nothing": "Files already match the current results. Nothing to move.",
     "gui.move.out": "Move {n} rejected frames to:\n{dir}",
+    "gui.move.out_each": "Move {n} rejected frames into the rejected folder inside each folder:",
+    "gui.move.dir_line": "{dir}: {n}",
+    "gui.move.more_dirs": "…and {n} more folders",
+    "gui.move.where_each": " (rejected folder inside each folder)",
     "gui.move.back": "Move {n} previously rejected frames that are now kept back to their original folder",
     "gui.move.confirm": "Go ahead? You can undo this later with “Restore All”.",
     "gui.move.error": "An error occurred while moving files:\n{error}\n\n"
@@ -495,6 +542,8 @@ _EN: dict[str, str] = {
     "gui.restore.nothing": "There is nothing to restore in the reject folder.",
     "gui.restore.confirm": "Move all {n} FITS files in {dir} back?\n"
                            "(Files you put there by hand also go back to the light folder.)",
+    "gui.restore.confirm_each": "Move all {n} files in each folder's rejected folder back?\n"
+                                "(Files you put there yourself also go back to that folder.)",
     "gui.restore.error": "An error occurred while restoring:\n{error}",
     "gui.restore.done": "Restored {n} frames",
     "gui.close.confirm": "Measuring is still running. Close anyway?",

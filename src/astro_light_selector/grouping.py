@@ -1,4 +1,4 @@
-"""把一批影像依濾鏡 / 曝光 / 夜晚分組，每組各自算門檻。
+"""把一批影像依濾鏡 / 曝光 / ISO 或增益 / 夜晚 / 子資料夾分組，每組各自算門檻。
 
 不同濾鏡（L 跟 Ha）或不同曝光時間的背景、星點數差好幾倍，混在一起算中位數，
 會把整組窄頻或短曝光的全部 reject。
@@ -7,13 +7,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from .i18n import tr
 from .metrics import FrameMetrics
 
-GROUP_KEYS = ("filter", "exposure", "night")
-# 相鄰兩張間隔超過這麼久就當成不同晚
-NIGHT_GAP = timedelta(hours=4)
+GROUP_KEYS = ("filter", "exposure", "gain", "night", "folder")
+DEFAULT_GROUP_KEYS = ("filter", "exposure", "gain")
+# 相鄰兩張間隔超過這麼久就當成不同晚：白天至少十幾小時，一晚中間被雲擋幾小時也還算同一晚
+NIGHT_GAP = timedelta(hours=8)
 
 
 def parse_group_keys(text: str) -> tuple[str, ...]:
@@ -81,16 +83,44 @@ def exposure_buckets(frames: list[FrameMetrics], tolerance: float = EXPOSURE_TOL
     return labels
 
 
+def _gain_label(f: FrameMetrics) -> str:
+    """單眼看 ISO、天文相機看 GAIN；不同 ISO / 增益的背景、雜訊、星點數差很多。"""
+    if f.iso is not None:
+        return tr("group.iso", value=f"{f.iso:g}")
+    if f.gain is not None:
+        return tr("group.gain", value=f"{f.gain:g}")
+    return tr("group.no_gain")
+
+
+def _folder_of(f: FrameMetrics, root: Path | None) -> str:
+    """影像所在的子資料夾（相對於開啟的資料夾）；就在開啟的資料夾裡是空字串。"""
+    parent = Path(f.file).parent
+    if root is not None:
+        for a, b in ((parent, Path(root)), (parent.resolve(), Path(root).resolve())):
+            try:
+                rel = a.relative_to(b).as_posix()
+                return "" if rel == "." else rel
+            except ValueError:
+                pass
+    return parent.name
+
+
 def group_frames(frames: list[FrameMetrics], keys: tuple[str, ...],
-                 exposure_tolerance: float = EXPOSURE_TOLERANCE) -> dict[str, list[FrameMetrics]]:
+                 exposure_tolerance: float = EXPOSURE_TOLERANCE,
+                 root: Path | None = None) -> dict[str, list[FrameMetrics]]:
     """回傳 {分組標籤: 影像清單}，保留原本順序。keys 為空時整批一組（標籤為空字串）。
 
     標籤用目前的介面語言組成，例如「濾鏡 L／曝光 300s」。
+    ISO / 增益整批都沒有資料（例如舊報表）、或全部在同一個資料夾時，標籤不加那一段。
+    root 是開啟的資料夾，依子資料夾分組時用。
     """
     if not keys:
         return {"": list(frames)}
     nights = assign_nights(frames) if "night" in keys else {}
     exposures = exposure_buckets(frames, exposure_tolerance) if "exposure" in keys else {}
+    use_gain = "gain" in keys and any(f.iso is not None or f.gain is not None for f in frames)
+    folders = {f.file: _folder_of(f, root) for f in frames} if "folder" in keys else {}
+    use_folder = len(set(folders.values())) > 1
     groups: dict[str, list[FrameMetrics]] = {}
     for f in frames:
         parts = []
@@ -99,6 +129,13 @@ def group_frames(frames: list[FrameMetrics], keys: tuple[str, ...],
                 parts.append(tr("group.filter", value=f.filter) if f.filter else tr("group.no_filter"))
             elif k == "exposure":
                 parts.append(tr("group.exposure", value=exposures.get(f.exposure, _fmt_exposure(f.exposure))))
+            elif k == "gain":
+                if use_gain:
+                    parts.append(_gain_label(f))
+            elif k == "folder":
+                if use_folder:
+                    folder = folders[f.file]
+                    parts.append(tr("group.folder", value=folder) if folder else tr("group.top_folder"))
             else:
                 parts.append(tr("group.night", value=nights.get(f.file, "?")))
         groups.setdefault(tr("group.sep").join(parts), []).append(f)

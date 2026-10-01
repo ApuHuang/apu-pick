@@ -15,6 +15,7 @@ APU Pick 的進階說明：給想用命令列、調更多參數，或自己改�
 | `saturated_frac` | 飽和像素比例 |
 | `altitude` | 目標仰角（度），曝光中間點 |
 | `moon_alt` / `moon_sep` / `moon_illum` | 月亮仰角、月亮離目標的角距離（度）、月相（被照亮的比例 0~1） |
+| `iso` / `gain` | 單眼 RAW 的 ISO、天文相機 header 的 `GAIN` |
 
 OSC（Bayer）影像會先做 2x2 super-pixel 再偵測，Fuji X-Trans 做 3x3，FWHM 會換算回原始像素尺度。
 單眼 RAW 用 rawpy（LibRaw）讀原始 CFA 資料並扣掉黑位，快門、ISO、拍攝時間從 EXIF 讀。
@@ -45,13 +46,27 @@ OSC（Bayer）影像會先做 2x2 super-pixel 再偵測，Fuji X-Trans 做 3x3�
 
 ### 分組
 
-預設依**濾鏡 + 曝光時間**分組，每組各自算範本和門檻。L 跟 Ha、60s 跟 300s 的背景和星點數
-差好幾倍，混在一起算會把整組窄頻或短曝光的全部淘汰。
+預設依**濾鏡 + 曝光時間 + ISO／增益**分組，每組各自算範本和門檻。L 跟 Ha、60s 跟 300s、
+ISO 800 跟 1600 的背景、雜訊和星點數差好幾倍，混在一起算會把整組窄頻、短曝光或低 ISO 的全部淘汰。
+ISO／增益（`gain`）：單眼看 RAW 的 ISO，天文相機看 header 的 `GAIN`；整批都沒有這項資料時不分。
 
-多晚的資料可以加上 `night`（`--group-by filter,exposure,night`），每晚各自比較。
-「一晚」是依 DATE-OBS 相鄰兩張間隔超過 4 小時切開的，跨過午夜也算同一晚。
+多晚的資料可以加上 `night`（`--group-by filter,exposure,gain,night`），每晚各自比較。
+「一晚」是依 DATE-OBS 相鄰兩張間隔超過 8 小時切開的，不看日期，跨過午夜、中間被雲擋幾小時都還算同一晚。
+自己用資料夾分好每晚的（見下面「子資料夾」），用 `folder` 依子資料夾分開更準。
 
 單眼 B 快門的曝光時間常差一兩秒（301、302 秒），`--exposure-tolerance`（預設 2 秒）範圍內算同一組。
+
+### 子資料夾
+
+開啟的資料夾本身沒有影像、子資料夾裡有時（例如單眼的 `light/iso800/date_2026 0101/`、`date_2026 0202/`…），
+會自動改成**包含子資料夾**，一次處理全部；也可以用 `--recursive`（視窗版是「量測」裡的開關）自己打開。
+
+- 不限層數；`rejected` 以及名稱含 dark、flat、bias、master、calibrated 的資料夾會跳過（不分大小寫）
+- 淘汰片搬到**每張自己所在資料夾的 `rejected/`**，各自有 `moves.csv`；這個模式不能指定 `--reject-dir`
+- 預設整批一起評分（跟全部放在同一個資料夾的結果一樣）；`--group-by` 加上 `folder` 就每個子資料夾各自比較
+- 報表只存在最上層一份，`file` 欄是相對路徑（例如 `iso800/date_2026 0101/DSC00001.ARW`），
+  每晚檔名重複也分得開；之後單獨開某一晚的資料夾要重新量測
+- 上次是用子資料夾模式存的報表，下次開同一個資料夾會自動包含子資料夾
 
 也可以用 `--mode rules`（只有命令列版）：四個指標各自獨立門檻（中位數 ± k × MAD 加上絕對上下限），
 任何一項不合格就淘汰。
@@ -92,7 +107,9 @@ python -m astro_light_selector D:\astro\M31\lights --group-by filter,exposure,ni
 
 # 後悔了：把 rejected 裡的檔案全部搬回原位
 python -m astro_light_selector D:\astro\M31\lights --restore
-```
+
+# 單眼多晚資料：一次處理所有子資料夾，每晚的淘汰片搬到各自的 rejected
+python -m astro_light_selector D:\astro\NGC7000\light --recursive```
 
 `pip install -e .` 之後也可以直接用 `apu-pick <folder>`。
 
@@ -124,13 +141,14 @@ python -m astro_light_selector D:\astro\M31\lights --restore
 
 | 參數 | 預設 | 說明 |
 |---|---|---|
-| `--reject-dir` | `<folder>/rejected` | 淘汰片搬去的資料夾 |
+| `--reject-dir` | `<folder>/rejected` | 淘汰片搬去的資料夾（子資料夾模式不能用） |
+| `--recursive` | 自動 | 包含子資料夾；folder 本身沒有影像、子資料夾有時自動打開 |
 | `--report` | `<folder>/selection_report.csv` | CSV 報表路徑 |
 | `--dry-run` | | 只分析、輸出報表，不搬檔案 |
 | `--workers N` | 1 | 平行處理數 |
 | `--from-report CSV` | | 不重新量測，讀舊報表重套門檻 |
 | `--mode` | score | `score` 評分模式 / `rules` 規則模式 |
-| `--group-by` | `filter,exposure` | 分組欄位（`filter` / `exposure` / `night`），`none` 表示整批一起算 |
+| `--group-by` | `filter,exposure,gain` | 分組欄位（`filter` / `exposure` / `gain`（ISO／增益）/ `night` / `folder`（子資料夾）），`none` 表示整批一起算 |
 | `--exposure-tolerance` | 2 | 曝光時間差在幾秒以內算同一組 |
 | `--plot [PNG]` | | 輸出趨勢圖（預設 `<folder>/selection_plot.png`） |
 | `--restore` | | 把淘汰片資料夾的檔案搬回原位後結束 |
@@ -194,7 +212,7 @@ apu-pick/
 │   ├── sky.py         # 目標仰角、月亮（從 header 算）
 │   ├── preview.py     # 預覽縮圖（自動拉伸）
 │   ├── scoring.py     # 最佳範本評分
-│   ├── grouping.py    # 依濾鏡 / 曝光 / 夜晚分組
+│   ├── grouping.py    # 依濾鏡 / 曝光 / ISO／增益 / 夜晚 / 子資料夾分組
 │   ├── selector.py    # 保留 / 淘汰判斷
 │   ├── report.py      # CSV 報表與摘要輸出
 │   ├── mover.py       # 搬移 / 還原淘汰片

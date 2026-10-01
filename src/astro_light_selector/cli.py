@@ -6,12 +6,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from .grouping import EXPOSURE_TOLERANCE, GROUP_KEYS, parse_group_keys
+from .grouping import DEFAULT_GROUP_KEYS, EXPOSURE_TOLERANCE, GROUP_KEYS, parse_group_keys
 from .i18n import APP_NAME, APP_SUBTITLE, tr, tr_error
 from .metrics import FrameMetrics
-from .mover import restore_rejected, sync_files
-from .pipeline import REJECT_DIR_NAME, REPORT_NAME, collect_files, decide, measure_files
-from .report import print_score_summary, print_summary, read_csv, read_overrides, write_csv
+from .pipeline import (REJECT_DIR_NAME, REPORT_NAME, collect_files, decide, measure_files, move_files,
+                       restore_files, should_recurse)
+from .report import has_subfolders, print_score_summary, print_summary, read_csv, read_overrides, write_csv
 from .scoring import METRICS, ScoreConfig
 from .selector import Thresholds
 
@@ -24,7 +24,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("folder", type=Path, help="放 light frames 的資料夾")
     p.add_argument("--reject-dir", type=Path, default=None,
-                   help="淘汰片搬去的資料夾（預設 <folder>/rejected）")
+                   help="淘汰片搬去的資料夾（預設 <folder>/rejected；子資料夾模式不能指定）")
+    p.add_argument("--recursive", action="store_true",
+                   help="包含子資料夾，每張的淘汰片搬到自己所在資料夾的 rejected（folder 本身沒有影像、"
+                        "子資料夾有時會自動打開）")
     p.add_argument("--report", type=Path, default=None,
                    help="CSV 報表路徑（預設 <folder>/selection_report.csv）")
     p.add_argument("--dry-run", action="store_true", help="只分析與輸出報表，不搬檔案")
@@ -33,16 +36,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="不重新量測，直接讀之前的 CSV 報表重新套門檻（調參數用）")
     p.add_argument("--mode", choices=["score", "rules"], default="score",
                    help="score：以最佳範本評分（預設）；rules：各指標獨立門檻")
-    p.add_argument("--group-by", type=str, default="filter,exposure",
-                   help=f"依這些欄位分組、各組分開算門檻，逗號分隔（{', '.join(GROUP_KEYS)}），"
-                        "none 表示整批一起算（預設 filter,exposure）")
+    p.add_argument("--group-by", type=str, default=",".join(DEFAULT_GROUP_KEYS),
+                   help=f"依這些欄位分組、各組分開算門檻，逗號分隔（{', '.join(GROUP_KEYS)}；"
+                        "gain 是 ISO 或增益，folder 是子資料夾），none 表示整批一起算"
+                        f"（預設 {','.join(DEFAULT_GROUP_KEYS)}）")
     p.add_argument("--exposure-tolerance", type=float, default=EXPOSURE_TOLERANCE,
                    help=f"曝光時間差在幾秒以內算同一組（單眼 B 快門常有一兩秒誤差，預設 {EXPOSURE_TOLERANCE:g}）")
     p.add_argument("--plot", nargs="?", type=Path, const=True, default=None,
                    help="輸出指標趨勢圖 PNG（預設 <folder>/selection_plot.png，需要 matplotlib）")
     p.add_argument("--restore", action="store_true",
                    help="把 rejected 資料夾裡的檔案搬回原位後結束（可配合 --dry-run）")
-
     g = p.add_argument_group("評分模式（--mode score）")
     g.add_argument("--top-frac", type=float, default=0.10, help="每個指標取最好的前幾成當範本（預設 0.10）")
     g.add_argument("--pass-pct", type=float, default=0.80, help="及格線 = 範本分數 × 此值（預設 0.80）")
@@ -128,10 +131,18 @@ def main(argv: list[str] | None = None) -> int:
     if not folder.is_dir():
         print(f"找不到資料夾: {folder}", file=sys.stderr)
         return 1
+    report = args.report or folder / REPORT_NAME
+    source = args.from_report or report
+    recursive = args.recursive or has_subfolders(source) or should_recurse(folder)
+    if recursive and args.reject_dir:
+        parser.error("子資料夾模式下淘汰片固定搬到各自資料夾的 rejected，不能指定 --reject-dir")
+    if recursive and not args.recursive:
+        print("這個資料夾本身沒有影像（或上次是用子資料夾模式），自動包含子資料夾")
     reject_dir = args.reject_dir or folder / REJECT_DIR_NAME
+    where = "各資料夾裡的 rejected" if recursive else str(reject_dir)
 
     if args.restore:
-        restored = restore_rejected(reject_dir, folder, dry_run=args.dry_run)
+        restored = restore_files(folder, reject_dir, recursive, dry_run=args.dry_run)
         verb = "預計搬回" if args.dry_run else "已搬回"
         print(f"{verb} {len(restored)} 張")
         return 0
@@ -155,12 +166,14 @@ def main(argv: list[str] | None = None) -> int:
         frames = read_csv(args.from_report, folder)
         print(f"從 {args.from_report} 讀入 {len(frames)} 張的量測結果")
     else:
-        files, home_of = collect_files(folder, reject_dir)
+        files, home_of = collect_files(folder, reject_dir, recursive)
         if not files:
-            print(f"{folder} 內沒有 FITS 檔案", file=sys.stderr)
+            print(f"{folder} 內沒有影像檔案", file=sys.stderr)
             return 1
         extra = f"（含之前淘汰的 {len(home_of)} 張）" if home_of else ""
-        print(f"分析 {len(files)} 張影像{extra}...")
+        n_dirs = len({Path(home_of.get(str(f), f)).resolve().parent for f in files})
+        dirs = f"，{n_dirs} 個資料夾" if recursive else ""
+        print(f"分析 {len(files)} 張影像{extra}{dirs}...")
         frames = measure_files(files, args.workers, progress=_progress, home_of=home_of)
 
     cfg = ScoreConfig(top_frac=args.top_frac, pass_pct=args.pass_pct, margin_k=args.margin_k,
@@ -170,9 +183,8 @@ def main(argv: list[str] | None = None) -> int:
     th = _build_thresholds(args)
 
     # 視窗版在清單上手動覆寫的結果存在報表裡；重寫報表前先讀出來，照樣套用
-    report = args.report or folder / REPORT_NAME
-    overrides = read_overrides(args.from_report or report)
-    sel = decide(frames, group_keys, args.mode, cfg, th, args.exposure_tolerance, overrides)
+    overrides = read_overrides(source)
+    sel = decide(frames, group_keys, args.mode, cfg, th, args.exposure_tolerance, overrides, root=folder)
     for label, size in sel.group_sizes.items():
         if len(sel.group_sizes) > 1:
             print(f"\n== {label}（{size} 張）==")
@@ -184,8 +196,8 @@ def main(argv: list[str] | None = None) -> int:
                 print_score_summary(result)
     decisions = sel.decisions
 
-    write_csv(decisions, report)
-    print_summary(decisions)
+    write_csv(decisions, report, root=folder)
+    print_summary(decisions, folder)
     print(f"\n報表: {report}")
 
     if args.plot:
@@ -197,10 +209,10 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError:
             print("畫圖需要 matplotlib：pip install matplotlib", file=sys.stderr)
 
-    moved_out, moved_back = sync_files(decisions, reject_dir, dry_run=args.dry_run)
+    moved_out, moved_back = move_files(decisions, reject_dir, recursive, dry_run=args.dry_run)
     if moved_out:
         verb = "預計搬移" if args.dry_run else "已搬移"
-        print(f"{verb} {len(moved_out)} 張到 {reject_dir}")
+        print(f"{verb} {len(moved_out)} 張到 {where}")
     if moved_back:
         verb = "預計搬回" if args.dry_run else "已搬回"
         print(f"{verb} {len(moved_back)} 張這次變成保留的到原位")
