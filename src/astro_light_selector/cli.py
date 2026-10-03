@@ -11,7 +11,8 @@ from .i18n import APP_NAME, APP_SUBTITLE, tr, tr_error
 from .metrics import FrameMetrics
 from .pipeline import (REJECT_DIR_NAME, REPORT_NAME, collect_files, decide, measure_files, move_files,
                        restore_files, should_recurse)
-from .report import has_subfolders, print_score_summary, print_summary, read_csv, read_overrides, write_csv
+from .report import (match_frames, print_score_summary, print_summary, read_csv, read_overrides, report_subfolders,
+                     write_csv)
 from .scoring import METRICS, ScoreConfig
 from .selector import Thresholds
 
@@ -24,7 +25,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("folder", type=Path, help="放 light frames 的資料夾")
     p.add_argument("--reject-dir", type=Path, default=None,
-                   help="淘汰片搬去的資料夾（預設 <folder>/rejected；子資料夾模式不能指定）")
+                   help="淘汰片搬去的資料夾（預設 <folder>/rejected；子資料夾模式預設是各資料夾裡的 rejected，"
+                        "指定時照原本的子資料夾結構放進去）")
     p.add_argument("--recursive", action="store_true",
                    help="包含子資料夾，每張的淘汰片搬到自己所在資料夾的 rejected（folder 本身沒有影像、"
                         "子資料夾有時會自動打開）")
@@ -133,13 +135,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     report = args.report or folder / REPORT_NAME
     source = args.from_report or report
-    recursive = args.recursive or has_subfolders(source) or should_recurse(folder)
-    if recursive and args.reject_dir:
-        parser.error("子資料夾模式下淘汰片固定搬到各自資料夾的 rejected，不能指定 --reject-dir")
+    recursive = args.recursive or report_subfolders(source, folder) or should_recurse(folder)
     if recursive and not args.recursive:
         print("這個資料夾本身沒有影像（或上次是用子資料夾模式），自動包含子資料夾")
-    reject_dir = args.reject_dir or folder / REJECT_DIR_NAME
-    where = "各資料夾裡的 rejected" if recursive else str(reject_dir)
+    if recursive:
+        reject_dir = args.reject_dir
+        where = f"{reject_dir}（照子資料夾結構放）" if reject_dir else "各資料夾裡的 rejected"
+    else:
+        reject_dir = args.reject_dir or folder / REJECT_DIR_NAME
+        where = str(reject_dir)
 
     if args.restore:
         restored = restore_files(folder, reject_dir, recursive, dry_run=args.dry_run)
@@ -159,12 +163,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.keep_best is not None and not 0 < args.keep_best <= 1:
         parser.error("--keep-best 要在 0~1 之間，例如 0.7")
 
+    renamed: dict[str, str] = {}
     if args.from_report:
         if not args.from_report.is_file():
             print(f"找不到報表: {args.from_report}", file=sys.stderr)
             return 1
         frames = read_csv(args.from_report, folder)
         print(f"從 {args.from_report} 讀入 {len(frames)} 張的量測結果")
+        # 檔案被搬動過、路徑對不上的，用檔名認回（只認檔名唯一的）
+        _, renamed = match_frames(frames, *collect_files(folder, reject_dir, recursive), folder)
+        if renamed:
+            print(f"其中 {len(renamed)} 張的位置變了，依檔名認回")
     else:
         files, home_of = collect_files(folder, reject_dir, recursive)
         if not files:
@@ -184,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # 視窗版在清單上手動覆寫的結果存在報表裡；重寫報表前先讀出來，照樣套用
     overrides = read_overrides(source)
+    overrides = {renamed.get(k, k): v for k, v in overrides.items()}
     sel = decide(frames, group_keys, args.mode, cfg, th, args.exposure_tolerance, overrides, root=folder)
     for label, size in sel.group_sizes.items():
         if len(sel.group_sizes) > 1:
@@ -209,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError:
             print("畫圖需要 matplotlib：pip install matplotlib", file=sys.stderr)
 
-    moved_out, moved_back = move_files(decisions, reject_dir, recursive, dry_run=args.dry_run)
+    moved_out, moved_back = move_files(decisions, reject_dir, recursive, dry_run=args.dry_run, folder=folder)
     if moved_out:
         verb = "預計搬移" if args.dry_run else "已搬移"
         print(f"{verb} {len(moved_out)} 張到 {where}")

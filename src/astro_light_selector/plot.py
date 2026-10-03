@@ -81,16 +81,17 @@ def _draw_altitude(ax, ordered: list[Decision], x: np.ndarray, keep: np.ndarray,
 
 
 def draw_decisions(fig: Figure, decisions: list[Decision], thresholds: dict[str, float] | None = None,
-                   dark: bool = False) -> None:
+                   dark: bool = False) -> list[Decision]:
     """清掉 fig 重畫：依分組、DATE-OBS 排序的多格圖。
 
     thresholds: {分組標籤: 保留門檻}，評分模式時在分數格畫出門檻線。
+    回傳畫出來的順序：x 座標 i 就是第 i 張（視窗點趨勢圖時用來找是哪一張）。
     """
     theme = DARK if dark else LIGHT
     fig.clear()
     fig.set_facecolor(theme["bg"])
     if not decisions:
-        return
+        return []
     # 先依分組、再依時間，同組連在一起（LRGB 輪流拍時才不會切得零零碎碎）
     ordered = sorted(decisions, key=lambda d: (d.group, d.metrics.date_obs or "", d.metrics.file))
     x = np.arange(len(ordered))
@@ -146,6 +147,7 @@ def draw_decisions(fig: Figure, decisions: list[Decision], thresholds: dict[str,
     for text in legend.get_texts():
         text.set_color(theme["text"])
     axes[-1].set_xlabel(tr("plot.xlabel"), color=theme["text"])
+    return ordered
 
 
 def plot_decisions(decisions: list[Decision], path: Path, thresholds: dict[str, float] | None = None) -> None:

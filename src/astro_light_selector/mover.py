@@ -86,6 +86,14 @@ def _remove_if_empty(folder: Path) -> None:
         pass
 
 
+def remove_empty_dirs(top: Path) -> None:
+    """把 top 底下（含 top）空掉的資料夾收掉；裡面還有東西的 rmdir 會失敗，不會刪到檔案。"""
+    if not top.is_dir():
+        return
+    for dirpath, _, _ in os.walk(top, topdown=False):
+        _remove_if_empty(Path(dirpath))
+
+
 def _free_name(dest: Path, src: Path, taken: set[Path]) -> Path:
     """dest 裡不會覆蓋到別的檔案的名字，同名就加 _1、_2…"""
     target = dest / src.name

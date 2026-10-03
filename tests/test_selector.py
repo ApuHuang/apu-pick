@@ -556,10 +556,140 @@ def test_recursive_rejects_into_each_night_folder(tmp_path: Path):
         assert all(p.exists() for p in files["good"] + files["bad"])
 
 
-def test_recursive_rejects_custom_reject_dir(tmp_path: Path):
-    _multi_night(tmp_path)
-    with pytest.raises(SystemExit):
-        main([str(tmp_path), "--recursive", "--reject-dir", str(tmp_path / "elsewhere")])
+def test_recursive_custom_reject_dir_keeps_structure(tmp_path: Path):
+    nights = _multi_night(tmp_path)
+    # 自訂的淘汰片資料夾放在開啟的資料夾裡面：要照子資料夾結構放，而且重跑時不能被當成影像資料夾掃進來
+    elsewhere = tmp_path / "second pass"
+    assert main([str(tmp_path), "--reject-dir", str(elsewhere), "--workers", "2"]) == 0
+    for name, files in nights.items():
+        moved = elsewhere / "iso800" / name
+        assert sorted(p.name for p in moved.glob("*.fits")) == sorted(p.name for p in files["bad"])
+        assert not (tmp_path / "iso800" / name / "rejected").exists()
+
+    # 讀上次的報表重跑：搬走的片照樣算進同一批，結果不變、不會再搬
+    assert main([str(tmp_path), "--reject-dir", str(elsewhere), "--from-report",
+                 str(tmp_path / "selection_report.csv")]) == 0
+    text = (tmp_path / "selection_report.csv").read_text(encoding="utf-8-sig")
+    assert text.count("\nsecond pass/") == 0 and text.count(",reject,") == 6
+
+    # 全部還原：搬回各晚的資料夾，照結構建的空資料夾一起收掉
+    assert main([str(tmp_path), "--reject-dir", str(elsewhere), "--restore"]) == 0
+    assert all(p.exists() for files in nights.values() for p in files["bad"])
+    assert not elsewhere.exists()
+
+
+def test_report_paths_matched_by_file_name(tmp_path: Path):
+    """報表是子資料夾模式存的，後來檔案被攤平到同一層：用檔名認回，不用重新量測。"""
+    import shutil
+
+    from astro_light_selector.pipeline import collect_files, should_recurse
+    from astro_light_selector.report import match_frames, read_csv, report_subfolders
+
+    a = make_session(tmp_path / "night1", n_good=3)
+    for p in make_session(tmp_path / "night2", n_good=3)["good"]:
+        p.rename(p.with_name(f"n2_{p.name}"))
+    for p in (tmp_path / "night2").glob("bad_*.fits"):
+        p.rename(p.with_name(f"n2_{p.name}"))
+    assert main([str(tmp_path), "--dry-run"]) == 0
+    report = tmp_path / "selection_report.csv"
+    assert report_subfolders(report, tmp_path)
+    for night in ("night1", "night2"):
+        for p in (tmp_path / night).glob("*.fits"):
+            shutil.move(str(p), str(tmp_path / p.name))
+        shutil.rmtree(tmp_path / night)
+    assert not report_subfolders(report, tmp_path) and not should_recurse(tmp_path)
+
+    frames = read_csv(report, tmp_path)
+    files, home_of = collect_files(tmp_path)
+    kept, renamed = match_frames(frames, files, home_of, tmp_path)
+    assert len(kept) == len(files) == len(frames)
+    assert renamed[f"night1/{a['good'][0].name}"] == a["good"][0].name
+    assert all(Path(f.file).parent == tmp_path for f in kept)
+
+
+def test_report_match_skips_duplicate_names(tmp_path: Path):
+    """單眼的檔名每晚重複：同名的有好幾個就不猜，當成新檔案。"""
+    from astro_light_selector.metrics import FrameMetrics
+    from astro_light_selector.report import match_frames
+
+    def frame(rel):
+        return FrameMetrics(str(tmp_path / rel), 100, 3.0, 0.2, 800, 10, 20, 0, 120.0, None, None)
+
+    frames = [frame("a/DSC1.ARW"), frame("b/DSC1.ARW"), frame("a/DSC2.ARW")]
+    files = [tmp_path / "x" / "DSC1.ARW", tmp_path / "y" / "DSC1.ARW", tmp_path / "x" / "DSC2.ARW"]
+    kept, renamed = match_frames(frames, files, {}, tmp_path)
+    assert renamed == {"a/DSC2.ARW": "x/DSC2.ARW"}
+    assert [Path(f.file).name for f in kept] == ["DSC2.ARW"]
+
+
+def test_organize_and_undo(tmp_path: Path):
+    from astro_light_selector.metrics import FrameMetrics
+    from astro_light_selector.organize import ORGANIZE_LOG, organize, plan_organize, undo_organize
+
+    def frame(name, camera, filt, exposure, date):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_bytes(b"x")
+        return FrameMetrics(str(tmp_path / name), 100, 3.0, 0.2, 800, 10, 20, 0, exposure, filt, date,
+                            gain=100.0, camera=camera)
+
+    frames = [frame("a.fits", "ZWO ASI2600MM Pro", "Ha", 300.0, "2026-01-01T12:00:00"),
+              frame("b.fits", "ZWO ASI2600MM Pro", "OIII", 300.0, "2026-01-01T13:00:00"),
+              frame("c.fits", None, None, 301.0, "2026-01-01T14:00:00"),
+              frame("night2/a.fits", "ZWO ASI2600MM Pro", "Ha", 300.0, "2026-01-02T12:00:00")]
+    plan = plan_organize(frames, tmp_path, ("camera", "filter", "exposure"))
+    targets = {cur.relative_to(tmp_path.resolve()).as_posix(): t.relative_to(tmp_path.resolve()).as_posix()
+               for cur, t in plan}
+    assert targets == {
+        "a.fits": "ZWO ASI2600MM Pro/Ha/300~301s/a.fits",
+        "b.fits": "ZWO ASI2600MM Pro/OIII/300~301s/b.fits",
+        "c.fits": "UnknownCamera/NoFilter/300~301s/c.fits",
+        # 原本的子資料夾（每晚一個）保留那一層，同名的檔案才不會撞在一起
+        "night2/a.fits": "ZWO ASI2600MM Pro/Ha/300~301s/night2/a.fits",
+    }
+    done = organize(plan, tmp_path)
+    assert len(done) == 4 and (tmp_path / ORGANIZE_LOG).is_file()
+    assert not (tmp_path / "night2").exists()  # 搬空的資料夾收掉
+    # 已經整理好的再整理一次：從原位置算，不會越疊越深
+    for f, (_, target) in zip(frames, done):
+        f.file = str(target)
+    assert plan_organize(frames, tmp_path, ("camera", "filter", "exposure")) == []
+
+    back = undo_organize(tmp_path)
+    assert len(back) == 4
+    assert all((tmp_path / n).is_file() for n in ("a.fits", "b.fits", "c.fits", "night2/a.fits"))
+    assert not (tmp_path / ORGANIZE_LOG).exists() and not (tmp_path / "ZWO ASI2600MM Pro").exists()
+
+
+def test_organize_folder_names_are_safe():
+    from astro_light_selector.organize import safe_name
+
+    assert safe_name('L/R:G*B?') == "L_R_G_B_"
+    assert safe_name(" .hidden. ") == "hidden"
+    assert safe_name("") == "_"
+
+
+def test_kept_exposure_and_duration(tmp_path: Path):
+    from astro_light_selector.metrics import FrameMetrics
+    from astro_light_selector.report import format_duration, kept_exposure
+    from astro_light_selector.selector import Decision
+
+    def d(keep, exposure):
+        m = FrameMetrics(str(tmp_path / "x.fits"), 100, 3.0, 0.2, 800, 10, 20, 0, exposure, None, None)
+        return Decision(m, keep, [])
+
+    assert kept_exposure([d(True, 300.0)] * 203 + [d(False, 300.0)] * 93 + [d(True, None)]) == (60900.0, 204, 1)
+    assert format_duration(60900) == "16h 55m"
+    assert format_duration(45 * 60) == "45m"
+    assert format_duration(30) == "30s"
+
+
+def test_parse_number():
+    from astro_light_selector.darkroom import parse_number
+
+    assert parse_number("85%") == 85
+    assert parse_number("８５ 分") == 85
+    assert parse_number("2.5 秒") == 2.5
+    assert parse_number("abc") is None
 
 
 def test_single_folder_report_keeps_plain_file_names(tmp_path: Path):
@@ -605,3 +735,52 @@ def test_night_split_needs_eight_hour_gap():
     ])
     assert nights["a"] == nights["b"] == nights["c"] == "2026-01-01"
     assert nights["d"] == "2026-01-02"
+
+
+def test_raf_camera_from_header(tmp_path: Path):
+    from astro_light_selector.rawfile import _camera
+
+    raf = tmp_path / "DSCF0001.RAF"
+    raf.write_bytes(b"FUJIFILMCCD-RAW 0201FF179504" + b"X-E5".ljust(32, b"\0") + b"\0" * 100)
+    assert _camera(raf) == "FUJIFILM X-E5"
+    other = tmp_path / "x.RAF"
+    other.write_bytes(b"not a raf")
+    assert _camera(other) is None
+
+
+def test_cr3_camera_from_cmt1(tmp_path: Path):
+    """Canon CR3：型號在 moov → Canon uuid → CMT1（一小段 TIFF）裡。"""
+    import struct
+
+    from astro_light_selector.rawfile import _CANON_UUID, _camera
+
+    def box(kind: bytes, body: bytes) -> bytes:
+        return struct.pack(">I4s", 8 + len(body), kind) + body
+
+    make, model = b"Canon\0", b"Canon EOS R6\0"
+    data_at = 8 + 2 + 2 * 12 + 4
+    tiff = (b"II*\0" + struct.pack("<I", 8) + struct.pack("<H", 2)
+            + struct.pack("<HHII", 0x010F, 2, len(make), data_at)
+            + struct.pack("<HHII", 0x0110, 2, len(model), data_at + len(make))
+            + struct.pack("<I", 0) + make + model)
+    # CMT2 是 EXIF：曝光 300/1 秒、ISO 800、拍攝時間（Intel Mac 的舊版 rawpy 讀不到時靠它）
+    stamp = b"2026:01:02 21:30:00\0"
+    exif = (b"II*\0" + struct.pack("<I", 8) + struct.pack("<H", 3)
+            + struct.pack("<HHII", 0x829A, 5, 1, 50)
+            + struct.pack("<HHI", 0x8827, 3, 1) + struct.pack("<HH", 800, 0)
+            + struct.pack("<HHII", 0x9003, 2, len(stamp), 58)
+            + struct.pack("<I", 0) + struct.pack("<II", 300, 1) + stamp)
+    cr3 = tmp_path / "IMG_0001.CR3"
+    cr3.write_bytes(box(b"ftyp", b"crx \0\0\0\1")
+                    + box(b"moov", box(b"uuid", _CANON_UUID + box(b"CNCV", b"x") + box(b"CMT1", tiff)
+                                       + box(b"CMT2", exif))))
+    assert _camera(cr3) == "Canon EOS R6"
+
+    from datetime import datetime
+
+    from astro_light_selector.rawfile import _metadata
+
+    class OldRawpy:  # 舊版 rawpy 沒有 raw.other
+        pass
+
+    assert _metadata(OldRawpy(), cr3) == (300.0, 800.0, datetime(2026, 1, 2, 21, 30))

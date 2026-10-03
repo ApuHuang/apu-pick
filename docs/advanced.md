@@ -62,11 +62,26 @@ ISO／增益（`gain`）：單眼看 RAW 的 ISO，天文相機看 header 的 `G
 會自動改成**包含子資料夾**，一次處理全部；也可以用 `--recursive`（視窗版是「量測」裡的開關）自己打開。
 
 - 不限層數；`rejected` 以及名稱含 dark、flat、bias、master、calibrated 的資料夾會跳過（不分大小寫）
-- 淘汰片搬到**每張自己所在資料夾的 `rejected/`**，各自有 `moves.csv`；這個模式不能指定 `--reject-dir`
+- 淘汰片預設搬到**每張自己所在資料夾的 `rejected/`**，各自有 `moves.csv`；
+  指定 `--reject-dir`（視窗版是「淘汰片」的「變更…」）時，照原本的子資料夾結構放進去
+  （`<reject-dir>/iso800/date_2026 0101/DSC00001.ARW`），每個資料夾各有一份 `moves.csv`。
+  這個資料夾放在開啟的資料夾裡面也可以，掃描時會跳過它
 - 預設整批一起評分（跟全部放在同一個資料夾的結果一樣）；`--group-by` 加上 `folder` 就每個子資料夾各自比較
 - 報表只存在最上層一份，`file` 欄是相對路徑（例如 `iso800/date_2026 0101/DSC00001.ARW`），
   每晚檔名重複也分得開；之後單獨開某一晚的資料夾要重新量測
-- 上次是用子資料夾模式存的報表，下次開同一個資料夾會自動包含子資料夾
+- 上次是用子資料夾模式存的報表、而且那些子資料夾還在，下次開同一個資料夾會自動包含子資料夾
+- 報表的路徑對不上現在的檔案（檔案被搬過）時，用檔名認回量測結果；只認檔名唯一的，
+  同名的有好幾個（單眼每晚重複）就當成新檔案。手動覆寫跟著換到新位置，存報表時改寫成新的路徑
+
+### 整理檔案（視窗版）
+
+右側「整理檔案」依勾選的參數把影像搬進子資料夾：相機（FITS 的 `INSTRUME`；RAW 讀相機寫的型號：一般從 EXIF，Fujifilm RAF 從檔頭，Canon CR3 從 CMT1）、濾鏡（`FILTER`）、
+曝光時間（照「曝光誤差容許」合併，例如 `301~302s`）、ISO／增益（`ISO800`、`Gain111`）、每晚（第一張的日期）。
+讀不到的放在 `UnknownCamera`、`NoFilter` 這類資料夾。資料夾名稱不跟著介面語言。
+
+- 原本就在子資料夾裡的會保留那一層（`ASI2600MC/Ha/300s/date_0101/…`），同名檔案不會撞在一起
+- 搬了哪些記在開啟的資料夾裡的 `organize_log.csv`（相對路徑），「復原整理」照它搬回原位
+- 有淘汰片在淘汰片資料夾裡時要先「全部還原」，不然 `moves.csv` 的原位置會對不上
 
 也可以用 `--mode rules`（只有命令列版）：四個指標各自獨立門檻（中位數 ± k × MAD 加上絕對上下限），
 任何一項不合格就淘汰。
@@ -109,7 +124,11 @@ python -m astro_light_selector D:\astro\M31\lights --group-by filter,exposure,ni
 python -m astro_light_selector D:\astro\M31\lights --restore
 
 # 單眼多晚資料：一次處理所有子資料夾，每晚的淘汰片搬到各自的 rejected
-python -m astro_light_selector D:\astro\NGC7000\light --recursive```
+python -m astro_light_selector D:\astro\NGC7000\light --recursive
+
+# 同上，但淘汰片集中到另一個資料夾，照子資料夾結構放
+python -m astro_light_selector D:\astro\NGC7000\light --recursive --reject-dir D:\astro\NGC7000\second-pass
+```
 
 `pip install -e .` 之後也可以直接用 `apu-pick <folder>`。
 
@@ -141,7 +160,7 @@ python -m astro_light_selector D:\astro\NGC7000\light --recursive```
 
 | 參數 | 預設 | 說明 |
 |---|---|---|
-| `--reject-dir` | `<folder>/rejected` | 淘汰片搬去的資料夾（子資料夾模式不能用） |
+| `--reject-dir` | `<folder>/rejected` | 淘汰片搬去的資料夾（子資料夾模式預設是各資料夾裡的 `rejected`，指定時照子資料夾結構放） |
 | `--recursive` | 自動 | 包含子資料夾；folder 本身沒有影像、子資料夾有時自動打開 |
 | `--report` | `<folder>/selection_report.csv` | CSV 報表路徑 |
 | `--dry-run` | | 只分析、輸出報表，不搬檔案 |
@@ -216,6 +235,7 @@ apu-pick/
 │   ├── selector.py    # 保留 / 淘汰判斷
 │   ├── report.py      # CSV 報表與摘要輸出
 │   ├── mover.py       # 搬移 / 還原淘汰片
+│   ├── organize.py    # 依參數整理進子資料夾 / 復原
 │   ├── plot.py        # 趨勢圖
 │   ├── pipeline.py    # 量測 → 分組 → 挑片流程（命令列、視窗共用）
 │   ├── cli.py         # 命令列介面

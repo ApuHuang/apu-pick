@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from collections import Counter
 from pathlib import Path
 
 from .i18n import normalize_error, tr, tr_metric
@@ -16,7 +17,7 @@ COLUMNS = [
     "background", "noise", "snr", "saturated_frac",
     "exposure", "filter", "date_obs", "group", "error", "override",
     "altitude", "moon_alt", "moon_sep", "moon_illum",
-    "iso", "gain",
+    "iso", "gain", "camera",
 ]
 FLOAT_COLUMNS = ("fwhm", "eccentricity", "background", "noise", "snr", "saturated_frac",
                  "altitude", "moon_alt", "moon_sep", "moon_illum")
@@ -44,17 +45,69 @@ def read_csv(path: Path, folder: Path) -> list[FrameMetrics]:
                 filter=row["filter"] or None,
                 date_obs=row["date_obs"] or None,
                 error=normalize_error(row["error"]) if row["error"] else None,
+                camera=row.get("camera") or None,
                 **{k: float(row[k]) if row.get(k) else None for k in OPTIONAL_NUMBERS},
             ))
     return frames
 
 
-def has_subfolders(path: Path) -> bool:
-    """報表是用子資料夾模式存的（file 欄有子資料夾路徑）。"""
+def report_subfolders(path: Path, folder: Path) -> bool:
+    """報表是子資料夾模式存的，而且那些子資料夾還在（重開時要包含子資料夾）。
+
+    檔案後來被搬回同一層、子資料夾都不在了，就不算：不然報表一張都對不上，要整批重新量測。
+    """
     if not path.is_file():
         return False
     with path.open(newline="", encoding="utf-8-sig") as fh:
-        return any("/" in row["file"] for row in csv.DictReader(fh))
+        dirs = {row["file"].rpartition("/")[0] for row in csv.DictReader(fh) if "/" in row["file"]}
+    return any((folder / d).is_dir() for d in dirs)
+
+
+def match_frames(frames: list[FrameMetrics], files: list[Path], home_of: dict[str, str],
+                 folder: Path) -> tuple[list[FrameMetrics], dict[str, str]]:
+    """把報表讀回來的量測結果對到現在資料夾裡的檔案（files、home_of 是 collect_files 的結果）。
+
+    先照 frame_key（相對路徑）比對；對不上的再用檔名比，只有檔名在兩邊剩下的都只有一個時才認
+    （單眼的 DSC0001.ARW 每晚重複，重複的當成新檔案）。認回的片 file 改成現在的位置。
+    回傳 (對得上的片, {舊代號: 新代號})，後者用來把手動覆寫換到新代號。
+    """
+    now = {frame_key(home_of.get(str(p), p), folder): Path(home_of.get(str(p), p)) for p in files}
+    matched: list[FrameMetrics] = []
+    rest: list[FrameMetrics] = []
+    for f in frames:
+        key = frame_key(f.file, folder)
+        if key in now:
+            matched.append(f)
+            del now[key]
+        else:
+            rest.append(f)
+    names_now = Counter(p.name for p in now.values())
+    names_report = Counter(Path(f.file).name for f in rest)
+    by_name = {p.name: (key, p) for key, p in now.items() if names_now[p.name] == 1}
+    renamed: dict[str, str] = {}
+    for f in rest:
+        name = Path(f.file).name
+        if names_report[name] == 1 and name in by_name:
+            key, p = by_name[name]
+            renamed[frame_key(f.file, folder)] = key
+            f.file = str(p)
+            matched.append(f)
+    return matched, renamed
+
+
+def format_duration(seconds: float) -> str:
+    """總曝光時間，例如 16h 55m。"""
+    if 0 < seconds < 60:
+        return f"{seconds:.0f}s"
+    h, m = divmod(int(round(seconds / 60)), 60)
+    return f"{h}h {m}m" if h else f"{m}m"
+
+
+def kept_exposure(decisions: list[Decision]) -> tuple[float, int, int]:
+    """保留片的總曝光秒數、保留張數、其中沒有曝光時間（沒算進去）的張數。"""
+    kept = [d for d in decisions if d.keep]
+    missing = sum(1 for d in kept if not d.metrics.exposure)
+    return sum(d.metrics.exposure or 0 for d in kept), len(kept), missing
 
 
 def read_overrides(path: Path) -> dict[str, str]:

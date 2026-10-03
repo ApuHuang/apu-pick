@@ -67,6 +67,8 @@ class FrameMetrics:
     # 0.5 新增：依 ISO／增益分組用
     iso: float | None = None           # 相機 RAW 的 ISO
     gain: float | None = None          # 天文相機的 GAIN
+    # 0.6 新增：依參數整理資料夾用
+    camera: str | None = None          # 相機型號（FITS 的 INSTRUME；RAW 從 EXIF 讀）
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -164,6 +166,12 @@ def _number(header: fits.Header, *keys: str) -> float | None:
     return None
 
 
+def _text(header: fits.Header, key: str) -> str | None:
+    v = header.get(key)
+    v = str(v).strip() if v is not None else ""
+    return v or None
+
+
 def measure(path: Path) -> FrameMetrics:
     """計算單張 light frame 的品質指標。失敗時回傳帶 error 的結果。"""
     base = dict(
@@ -182,6 +190,7 @@ def measure(path: Path) -> FrameMetrics:
         date_obs=header.get("DATE-OBS"),
         iso=_number(header, "ISO", "ISOSPEED"),
         gain=_number(header, "GAIN"),
+        camera=_text(header, "INSTRUME"),
     )
     sky = sky_info(header)
     if sky is not None:

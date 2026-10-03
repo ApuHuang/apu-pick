@@ -26,15 +26,18 @@ from PIL import Image, ImageTk
 from . import __version__
 from .darkroom import (IS_MAC, Darkroom, Fonts, MetricRow, PanelGroup, ParameterSlider, ParameterToggle, Segmented,
                        Tooltip, _short_path, dark_title_bar, enable_dpi_awareness, setup_style)
-from .grouping import EXPOSURE_TOLERANCE
+from .grouping import EXPOSURE_TOLERANCE, assign_nights
 from .i18n import APP_NAME, APP_SUBTITLE, LANGUAGES, get_language, set_language, tr, tr_metric
 from .metrics import FrameMetrics, is_image
 from .mover import read_move_log
+from .organize import (DEFAULT_ORGANIZE_KEYS, ORGANIZE_KEYS, ORGANIZE_LOG, organize, pending_undo, plan_organize,
+                       undo_organize)
 from .pipeline import (REJECT_DIR_NAME, REPORT_NAME, Cancelled, Selection, collect_files, decide, frame_key,
-                       measure_files, move_files, restore_files, should_recurse)
+                       measure_files, move_files, reject_dir_for, restore_files, should_recurse)
 from .plot import draw_decisions
 from .preview import Preview, closeup, make_preview, thumbnail
-from .report import has_subfolders, read_csv, read_overrides, score_summary_lines, write_csv
+from .report import (format_duration, kept_exposure, match_frames, read_csv, read_overrides, report_subfolders,
+                     score_summary_lines, write_csv)
 from .scoring import DEFAULT_WEIGHTS, METRICS, ScoreConfig
 from .settings import load_settings, save_settings
 
@@ -45,6 +48,8 @@ LOGO = ASSETS / "icon_128.png"
 OPEN_SHORTCUT = "⌘O" if IS_MAC else "Ctrl+O"
 # 清單多選時按住的鍵（Mac 的 Control+點是右鍵）
 MULTI_SELECT_KEY = "⌘" if IS_MAC else "Ctrl"
+# 清單上的快速挑片鍵（K 保留、X 淘汰、A 改回自動）只在沒按修飾鍵時才算：Control、Mac 的 ⌘ / Option、Windows 的 Alt
+MODIFIER_MASK = 0x4 | 0x8 | 0x10 if IS_MAC else 0x4 | 0x20000
 
 
 # 清單欄位：(key, 標題的翻譯代號, 寬度 px, 對齊)
@@ -71,6 +76,15 @@ def default_workers() -> int:
 
 def _fmt(v: float | None, spec: str) -> str:
     return "-" if v is None or v != v else format(v, spec)
+
+
+def _fit(text: str, font, width: int) -> str:
+    """文字超過 width 像素就從後面截掉、加「…」。"""
+    if font.measure(text) <= width:
+        return text
+    while text and font.measure(text + "…") > width:
+        text = text[:-1]
+    return text + "…"
 
 
 # ---------------------------------------------------------------------- 元件
@@ -171,6 +185,12 @@ class PickView(tk.Frame):
         self._watch_job: str | None = None
         self._watch_sizes: dict[str, int] = {}
         self.only_reject_var = tk.BooleanVar(value=False)
+        # 整理檔案：依哪些參數分資料夾（記住上次勾的）
+        organize_keys = load_settings().get("organize_keys") or list(DEFAULT_ORGANIZE_KEYS)
+        self.organize_vars = {k: tk.BooleanVar(value=k in organize_keys) for k in ORGANIZE_KEYS}
+        # 趨勢圖只在看得到時才畫（清單上連按 K / X 時不用每次重畫）；_plot_order 是圖上第 i 個點是哪一張
+        self._plot_dirty = False
+        self._plot_order: list = []
         # 使用者在清單上手動覆寫的結果：{檔名: "keep" / "reject"}，存在報表的 override 欄
         self.overrides: dict[str, str] = {}
         # 預覽：最近看過的幾張留在記憶體，上下鍵切換比較快
@@ -208,6 +228,8 @@ class PickView(tk.Frame):
         for var in self.weight_vars.values():
             var.trace_add("write", lambda *_: self._update_weight_view())
         self.only_reject_var.trace_add("write", lambda *_: self._fill_table())
+        for var in self.organize_vars.values():
+            var.trace_add("write", lambda *_: save_settings(organize_keys=list(self._organize_keys())))
         self.watch_var.trace_add("write", lambda *_: self._toggle_watch())
         # 延到事件處理完再換：換語言會重建介面，包含正在處理點擊的那個切換鈕
         self.lang_var.trace_add("write", lambda *_: self.after_idle(self._language_clicked))
@@ -348,7 +370,10 @@ class PickView(tk.Frame):
 
         group = PanelGroup(panel, self, "result", tr("gui.group.result"), tr("gui.group.result.info"))
         self.metrics = {key: MetricRow(group.body, self, tr(f"gui.metric.{key}"))
-                        for key in ("frames", "kept", "rejected", "manual", "threshold", "ref_fwhm")}
+                        for key in ("frames", "kept", "rejected", "manual", "threshold", "ref_fwhm", "kept_exposure")}
+        # 保留片總曝光：超過一組、一晚時，每組、每晚各一行
+        self.exposure_rows = tk.Frame(group.body, bg=D.panel)
+        self.exposure_rows.pack(fill="x")
 
         group = PanelGroup(panel, self, "threshold", tr("gui.group.threshold"), tr("gui.group.threshold.info"))
         Segmented(group.body, self, [("auto", tr("gui.method.auto")), ("min_score", tr("gui.method.min_score")),
@@ -374,7 +399,9 @@ class PickView(tk.Frame):
         # 右邊顯示換算後的百分比；四個滑桿互相影響，所以由 _update_weight_view 一起更新
         self.weight_sliders = {
             m: ParameterSlider(group.body, self, tr(key), self.weight_vars[m], 0, 100,
-                               lambda _v, m=m: self._weight_share_text(m))
+                               lambda _v, m=m: self._weight_share_text(m),
+                               edit_text=lambda m=m: self._weight_share_number(m),
+                               on_entry=lambda v, m=m: self._set_weight_share(m, v))
             for m, key in (("fwhm", "gui.col.fwhm"), ("eccentricity", "gui.col.ecc"),
                            ("n_stars", "gui.col.stars"), ("background", "gui.col.bkg"), ("snr", "gui.col.snr"))
         }
@@ -409,8 +436,24 @@ class PickView(tk.Frame):
         self.change_btn = ttk.Button(row, text=tr("gui.btn.change"), style="Dark.TButton",
                                      command=self._browse_reject)
         self.change_btn.pack(side="left")
-        self.restore_btn = ttk.Button(row, text=tr("gui.btn.restore"), style="Dark.TButton", command=self._restore)
-        self.restore_btn.pack(side="left", padx=(self.px(6), 0))
+        self.default_reject_btn = ttk.Button(row, text=tr("gui.btn.default_reject"), style="Dark.TButton",
+                                             command=lambda: self._set_reject(None))
+        self.default_reject_btn.pack(side="left", padx=(self.px(6), 0))
+        self.restore_btn = ttk.Button(group.body, text=tr("gui.btn.restore"), style="Dark.TButton",
+                                      command=self._restore)
+        self.restore_btn.pack(anchor="w", pady=(self.px(6), 0))
+
+        group = PanelGroup(panel, self, "organize", tr("gui.group.organize"), tr("gui.group.organize.info"))
+        for key in ORGANIZE_KEYS:
+            ParameterToggle(group.body, self, tr(f"gui.organize.{key}"), self.organize_vars[key]).pack(
+                fill="x", pady=self.px(2))
+        row = tk.Frame(group.body, bg=D.panel)
+        row.pack(fill="x", pady=(self.px(8), 0))
+        self.organize_btn = ttk.Button(row, text=tr("gui.btn.organize"), style="Dark.TButton", command=self._organize)
+        self.organize_btn.pack(side="left")
+        self.undo_organize_btn = ttk.Button(row, text=tr("gui.btn.undo_organize"), style="Dark.TButton",
+                                            command=self._undo_organize)
+        self.undo_organize_btn.pack(side="left", padx=(self.px(6), 0))
 
     def _build_canvas_area(self, body: tk.Frame) -> None:
         D = Darkroom
@@ -448,8 +491,11 @@ class PickView(tk.Frame):
                 pass
         toolbar.update()
         toolbar.pack(side="bottom", fill="x")
+        self.toolbar = toolbar
         self.canvas.get_tk_widget().configure(bg=D.canvas, highlightthickness=0)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        self.canvas.mpl_connect("button_press_event", self._plot_clicked)
+        self.nb.bind("<<NotebookTabChanged>>", lambda _e: self._draw_plot())
 
         list_tab = ttk.Frame(self.nb, style="Canvas.TFrame")
         self.nb.add(list_tab, text=tr("gui.tab.list"))
@@ -483,6 +529,10 @@ class PickView(tk.Frame):
         for sequence in ("<Button-3>", "<Button-2>", "<Control-Button-1>"):
             self.tree.bind(sequence, self._show_row_menu)
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._schedule_preview())
+        # 快速挑片：K 強制保留、X 強制淘汰、A 改回自動
+        for letter, choice in (("k", "keep"), ("x", "reject"), ("a", None)):
+            for key in (letter, letter.upper()):
+                self.tree.bind(f"<KeyPress-{key}>", lambda e, c=choice: self._key_override(e, c))
         ys = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview, style="Dark.Vertical.TScrollbar")
         xs = ttk.Scrollbar(table, orient="horizontal", command=self.tree.xview, style="Dark.Horizontal.TScrollbar")
         self.tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
@@ -549,8 +599,7 @@ class PickView(tk.Frame):
         home = folder / key
         if home.exists():
             return home
-        reject_dir = home.parent / REJECT_DIR_NAME if self._recursive() else self._reject_dir()
-        moved = read_move_log(reject_dir) if reject_dir else {}
+        moved = read_move_log(reject_dir_for(home.parent, folder, self._reject_dir(), self._recursive()))
         target = moved.get(home.resolve())
         return target if target is not None and target.exists() else None
 
@@ -699,14 +748,17 @@ class PickView(tk.Frame):
         return Path(text) if text else None
 
     def _reject_dir(self) -> Path | None:
+        """自訂的淘汰片資料夾；沒自訂時，只開一層是 <資料夾>/rejected，子資料夾模式是 None（各資料夾裡的 rejected）。"""
         folder = self._folder()
         text = self.reject_var.get().strip().strip('"')
         if text:
             return Path(text)
+        if self._recursive():
+            return None
         return folder / REJECT_DIR_NAME if folder else None
 
     def _recursive(self) -> bool:
-        """包含子資料夾：每張的淘汰片搬到自己所在資料夾的 rejected，不能自訂淘汰片資料夾。"""
+        """包含子資料夾：淘汰片預設搬到每張自己所在資料夾的 rejected；自訂時照子資料夾結構放進去。"""
         return bool(self.recursive_var.get())
 
     def is_busy(self) -> bool:
@@ -737,14 +789,19 @@ class PickView(tk.Frame):
         has_report = has_folder and (folder / REPORT_NAME).is_file()
         self.load_btn.state([idle if has_report else "disabled"])
         self.restore_btn.state([idle if has_folder else "disabled"])
-        self.change_btn.state([idle if has_folder and not self._recursive() else "disabled"])
+        self.change_btn.state([idle if has_folder else "disabled"])
+        custom = self.reject_var.get().strip()
+        self.default_reject_btn.state([idle if has_folder and custom else "disabled"])
+        self.organize_btn.state([idle if self.frames and has_folder else "disabled"])
+        self.undo_organize_btn.state([idle if has_folder and (folder / ORGANIZE_LOG).is_file() else "disabled"])
 
         D = Darkroom
         self.folder_title.configure(text=folder.name if folder else tr("gui.no_folder"),
                                     fg=D.label if folder else D.secondary)
         reject_dir = self._reject_dir()
         if self._recursive():
-            self.reject_label.configure(text=tr("gui.reject_each"))
+            self.reject_label.configure(text=f"{_short_path(custom)}\n{tr('gui.reject_mirror')}" if custom
+                                        else tr("gui.reject_each"))
         else:
             self.reject_label.configure(text=_short_path(str(reject_dir)) if reject_dir else "—")
         if busy:
@@ -780,6 +837,30 @@ class PickView(tk.Frame):
         weights = self._weights()
         return f"{weights[metric] / sum(weights.values()) * 100:.0f}%" if weights else "—"
 
+    def _weight_share_number(self, metric: str) -> str:
+        weights = self._weights()
+        return f"{weights[metric] / sum(weights.values()) * 100:.0f}" if weights else ""
+
+    def _set_weight_share(self, metric: str, pct: float) -> None:
+        """在權重滑桿上直接打百分比：調這一項讓它佔 pct%，其他幾項維持彼此的比例。"""
+        pct = min(max(pct, 0.0), 100.0)
+        try:
+            weights = {m: max(0.0, float(var.get())) for m, var in self.weight_vars.items()}
+        except (tk.TclError, ValueError):
+            return
+        others = sum(w for m, w in weights.items() if m != metric)
+        if pct >= 100:
+            weights = {m: 100.0 if m == metric else 0.0 for m in weights}
+        elif others <= 0:
+            weights[metric] = 100.0 if pct > 0 else 0.0
+        else:
+            weights[metric] = pct / (100 - pct) * others
+        peak = max(weights.values())
+        if peak > 100:  # 滑桿最多 100：整組等比例縮小，百分比不變
+            weights = {m: w * 100 / peak for m, w in weights.items()}
+        for m, w in weights.items():
+            self.weight_vars[m].set(round(w, 2))
+
     def _update_weight_view(self) -> None:
         """每個滑桿右邊顯示換算後的百分比，上面標示建議 / 自訂。"""
         weights = self._weights()
@@ -813,6 +894,8 @@ class PickView(tk.Frame):
             self.welcome.pack(fill="both", expand=True)
             for row in self.metrics.values():
                 row.set("—")
+            for child in self.exposure_rows.winfo_children():
+                child.destroy()
             self.summary_var.set("")
 
     # ------------------------------------------------------------------ 資料夾
@@ -829,8 +912,20 @@ class PickView(tk.Frame):
     def _browse_reject(self) -> None:
         path = filedialog.askdirectory(title=tr("gui.pick_reject"))
         if path:
-            self.reject_var.set(str(Path(path)))
-            self._update_buttons()
+            self._set_reject(Path(path))
+
+    def _set_reject(self, path: Path | None) -> None:
+        """自訂淘汰片資料夾（None 改回預設）；每個資料夾分開記住，下次開同一個資料夾才找得到搬過去的片。"""
+        self.reject_var.set(str(path) if path else "")
+        folder = self._folder()
+        if folder is not None:
+            saved = dict(load_settings().get("reject_dirs") or {})
+            if path:
+                saved[str(folder.resolve())] = str(path)
+            else:
+                saved.pop(str(folder.resolve()), None)
+            save_settings(reject_dirs=saved)
+        self._update_buttons()
 
     def open_folder(self, path: str | Path) -> None:
         """開檔入口：開啟放 light frames 的資料夾（拖一張影像進來也行）。"""
@@ -845,8 +940,8 @@ class PickView(tk.Frame):
         if folder.is_file() and is_image(folder):
             folder = folder.parent  # 拖一張 FITS 進來也行
         if recursive is None:
-            report = folder / REPORT_NAME
-            recursive = folder.is_dir() and (has_subfolders(report) if report.is_file() else should_recurse(folder))
+            # 報表是子資料夾模式存的、而且那些子資料夾還在；檔案被搬回同一層時照資料夾現在的樣子判斷
+            recursive = folder.is_dir() and (report_subfolders(folder / REPORT_NAME, folder) or should_recurse(folder))
         self._setting_folder = True
         try:
             self.recursive_var.set(recursive)
@@ -854,7 +949,8 @@ class PickView(tk.Frame):
             self._setting_folder = False
         self.watch_var.set(False)  # 換資料夾就停止監看，要監看新的資料夾再自己打開
         self.folder_var.set(str(folder))
-        self.reject_var.set(str(folder / REJECT_DIR_NAME))
+        saved = (load_settings().get("reject_dirs") or {}).get(str(folder.resolve())) if folder.is_dir() else None
+        self.reject_var.set(saved or "")
         self.frames, self.selection = [], None
         self.overrides = read_overrides(folder / REPORT_NAME) if folder.is_dir() else {}
         self._previews.clear()
@@ -894,7 +990,7 @@ class PickView(tk.Frame):
 
     def _load_report(self) -> None:
         folder, reject_dir = self._folder(), self._reject_dir()
-        if folder is None or reject_dir is None:
+        if folder is None:
             return
         try:
             frames = read_csv(folder / REPORT_NAME, folder)
@@ -902,13 +998,18 @@ class PickView(tk.Frame):
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_NAME, tr("gui.err.load", error=exc))
             return
-        now = {frame_key(home_of.get(str(p), p), folder) for p in files}
-        # 已經不在資料夾（也不在淘汰片資料夾）的就不算進來，免得影響整批的統計
-        kept = [f for f in frames if frame_key(f.file, folder) in now]
-        n_new = len(now - {frame_key(f.file, folder) for f in frames})
+        # 已經不在資料夾（也不在淘汰片資料夾）的就不算進來，免得影響整批的統計；
+        # 路徑對不上的（檔案被搬動過）用檔名認回，手動覆寫也換到新位置
+        kept, renamed = match_frames(frames, files, home_of, folder)
+        n_new, n_renamed = len(files) - len(kept), len(renamed)
+        if renamed:
+            self.overrides = {renamed.get(k, k): v for k, v in self.overrides.items()}
         self.frames = kept
         self._apply()
+        if renamed:
+            self._save_report()  # 報表改寫成新的位置
         self._status(lambda: tr("gui.status.loaded", n=len(kept))
+                     + (tr("gui.status.loaded_renamed", n=n_renamed) if n_renamed else "")
                      + (tr("gui.status.loaded_new", n=n_new) if n_new else ""))
         self._update_buttons()
 
@@ -922,7 +1023,7 @@ class PickView(tk.Frame):
 
     def _start_measure(self) -> None:
         folder, reject_dir = self._folder(), self._reject_dir()
-        if folder is None or reject_dir is None or not folder.is_dir():
+        if folder is None or not folder.is_dir():
             messagebox.showwarning(APP_NAME, tr("gui.warn.pick_folder"))
             return
         files, home_of = collect_files(folder, reject_dir, self._recursive())
@@ -990,7 +1091,7 @@ class PickView(tk.Frame):
             return
         self._watch_job = self.after(self.WATCH_INTERVAL_MS, self._watch_tick)
         folder, reject_dir = self._folder(), self._reject_dir()
-        if self.is_busy() or folder is None or reject_dir is None or not folder.is_dir():
+        if self.is_busy() or folder is None or not folder.is_dir():
             return
         # 子資料夾模式下拍攝中新建的資料夾（例如新的一晚）也會被找到
         files, home_of = collect_files(folder, reject_dir, self._recursive())
@@ -1175,19 +1276,103 @@ class PickView(tk.Frame):
             self.metrics["threshold"].set(tr("gui.metric.per_group") if results else "—")
             self.metrics["ref_fwhm"].set(tr("gui.metric.per_group") if results else "—")
 
+        lines = self._show_exposure(sel)
         parts = [f"{tr_metric(m)} {cfg.weights[m] * 100:.0f}%" for m in METRICS]
-        lines: list[str] = [tr("summary.weights", parts=tr("summary.part_sep").join(parts)), ""]
+        lines += [tr("summary.weights", parts=tr("summary.part_sep").join(parts)), ""]
         for label, size in sel.group_sizes.items():
             lines.append(tr("summary.group_header", label=label or tr("group.all"), n=size))
             result = sel.results.get(label)
             lines += score_summary_lines(result) if result else [tr("summary.no_measurable")]
             lines.append("")
         self._set_summary_text("\n".join(lines))
-        draw_decisions(self.fig, sel.decisions, th, dark=True)
-        self.canvas.draw_idle()
+        self._plot_dirty = True
+        self._draw_plot()
         self._fill_table()
         self._update_result_view()
         self._update_buttons()
+
+    def _show_exposure(self, sel: Selection) -> list[str]:
+        """保留片總曝光：右側「結果」一列（超過一組、一晚時每組、每晚各一行），回傳門檻細節分頁用的幾行字。"""
+        total, n_kept, missing = kept_exposure(sel.decisions)
+        self.metrics["kept_exposure"].set(format_duration(total) if total else "—")
+        rows: list[tuple[str, float, int]] = []
+        lines = [tr("summary.exposure", t=format_duration(total), n=n_kept)]
+        if missing:
+            lines.append(tr("summary.exposure_missing", n=missing))
+        if len(sel.group_sizes) > 1:
+            # 面板上只寫各組不一樣的那幾段（例如每晚分開時只寫日期），組名太長擠不下
+            sep = tr("group.sep")
+            common = set.intersection(*(set(label.split(sep)) for label in sel.group_sizes))
+            for label in sel.group_sizes:
+                t, n, _ = kept_exposure([d for d in sel.decisions if d.group == label])
+                short = sep.join(p for p in label.split(sep) if p not in common)
+                rows.append((short or label or tr("group.all"), t, n))
+                lines.append(tr("summary.exposure_line", label=label or tr("group.all"), n=n, t=format_duration(t)))
+        nights = assign_nights([d.metrics for d in sel.decisions])
+        night_labels = sorted(set(nights.values()))
+        if len(night_labels) > 1 and not self.group_night_var.get():  # 每晚分開時，上面每組就是每晚
+            lines.append(tr("summary.exposure_nights"))
+            for night in night_labels:
+                t, n, _ = kept_exposure([d for d in sel.decisions if nights.get(d.metrics.file) == night])
+                rows.append((night, t, n))
+                lines.append(tr("summary.exposure_line", label=night, n=n, t=format_duration(t)))
+        for child in self.exposure_rows.winfo_children():
+            child.destroy()
+        width = self.px(Darkroom.panel_width - 50)  # 面板內容的寬度（扣掉左右留白、捲軸）
+        for label, t, n in rows:
+            row = MetricRow(self.exposure_rows, self, "")
+            value = tr("gui.metric.exposure_row", t=format_duration(t), n=n)
+            row.set(value)
+            # 組名太長（例如「無濾鏡／曝光 300s／增益 111／2026-09-05 晚」）就截短，數字才不會被擠出去
+            room = width - self.fonts.mono.measure(value) - self.px(12)
+            title = row.winfo_children()[0]
+            title.configure(text=_fit(f"  {label}", self.fonts.small, room))
+            Tooltip(title, label, self)
+        self._tag_widgets(self.exposure_rows)
+        lines.append("")
+        return lines
+
+    def _draw_plot(self) -> None:
+        """趨勢圖要重畫時，等切到趨勢圖分頁才畫（在清單上連續挑片時不用每次都重畫）。"""
+        if not self._plot_dirty or self.selection is None or self.nb.index("current") != 0:
+            return
+        self._plot_dirty = False
+        sel = self.selection
+        self._plot_order = draw_decisions(self.fig, sel.decisions, sel.thresholds, dark=True)
+        folder = self._folder()
+        names = [frame_key(d.metrics.file, folder) for d in self._plot_order]
+        for ax in self.fig.axes:  # 滑鼠移到點上時，工具列顯示是哪一張
+            ax.format_coord = lambda x, _y, names=names: self._plot_coord(names, x)
+        self.canvas.draw_idle()
+
+    @staticmethod
+    def _plot_coord(names: list[str], x: float) -> str:
+        i = int(round(x))
+        return tr("gui.plot.coord", name=names[i]) if 0 <= i < len(names) else ""
+
+    def _plot_clicked(self, event) -> None:
+        """在趨勢圖上點一下：跳到清單裡的那一張（平移、放大模式時不算）。"""
+        if event.button != 1 or event.inaxes is None or event.xdata is None or self.toolbar.mode:
+            return
+        i = int(round(event.xdata))
+        if 0 <= i < len(self._plot_order):
+            self.show_frame(frame_key(self._plot_order[i].metrics.file, self._folder()))
+
+    def show_frame(self, key: str) -> None:
+        """切到清單分頁，選取這一張並捲到中間；開著「只看淘汰片」而這張是保留的，先關掉才找得到。"""
+        if not self.tree.exists(key) and self.only_reject_var.get():
+            self.only_reject_var.set(False)
+        if not self.tree.exists(key):
+            return
+        self.nb.select(1)
+        self.tree.selection_set(key)
+        self.tree.focus(key)
+        self.tree.focus_set()
+        items = self.tree.get_children()
+        self.tree.update_idletasks()
+        first, last = self.tree.yview()
+        visible = (last - first) * len(items)
+        self.tree.yview_moveto(max(0.0, (items.index(key) - visible / 2) / len(items)))
 
     def _set_summary_text(self, text: str) -> None:
         self.summary_text.configure(state="normal")
@@ -1249,6 +1434,25 @@ class PickView(tk.Frame):
         self._apply()
         self._save_report()
 
+    def _key_override(self, event: tk.Event, choice: str | None) -> str | None:
+        """清單上按 K / X / A：跟按「強制保留／強制淘汰／改回自動」一樣；只選一張時接著選下一張。"""
+        if event.state & MODIFIER_MASK:
+            return None
+        selected = self.tree.selection()
+        if not selected:
+            return "break"
+        following = None
+        if len(selected) == 1:
+            items = self.tree.get_children()
+            i = items.index(selected[0])
+            following = items[i + 1] if i + 1 < len(items) else None
+        self._set_override(choice)
+        if following is not None and self.tree.exists(following):
+            self.tree.selection_set(following)
+            self.tree.focus(following)
+            self.tree.see(following)
+        return "break"
+
     def _sort_by(self, key: str, toggle: bool = True) -> None:
         """點欄位標題排序，同一欄再點一次反過來；toggle=False 用在重填清單後照原本的排序。"""
         last_key, last_reverse = self._sort
@@ -1273,10 +1477,10 @@ class PickView(tk.Frame):
 
     def _move(self) -> None:
         sel, reject_dir, folder = self.selection, self._reject_dir(), self._folder()
-        if sel is None or reject_dir is None or folder is None:
+        if sel is None or folder is None:
             return
         recursive = self._recursive()
-        out, back = move_files(sel.decisions, reject_dir, recursive, dry_run=True)
+        out, back = move_files(sel.decisions, reject_dir, recursive, dry_run=True, folder=folder)
         if not out and not back:
             messagebox.showinfo(APP_NAME, tr("gui.move.nothing"))
             return
@@ -1285,10 +1489,13 @@ class PickView(tk.Frame):
             # 每個資料夾各搬幾張，列出來讓使用者確認範圍對不對（例如有沒有掃到不該掃的資料夾）
             counts: dict[str, int] = {}
             for target in out:
-                sub = frame_key(target.parent.parent, folder)
+                # 自訂資料夾：照子資料夾結構放，相對於它；預設：各資料夾裡的 rejected，往上一層
+                sub = frame_key(target.parent, reject_dir) if reject_dir else frame_key(target.parent.parent, folder)
                 counts[sub] = counts.get(sub, 0) + 1
             shown = sorted(counts.items())[:12]
-            lines.append("\n".join([tr("gui.move.out_each", n=len(out))]
+            head = tr("gui.move.out_mirror", n=len(out), dir=reject_dir) if reject_dir else tr("gui.move.out_each",
+                                                                                              n=len(out))
+            lines.append("\n".join([head]
                                    + [tr("gui.move.dir_line", dir=sub if sub != "." else tr("group.top_folder"), n=n)
                                       for sub, n in shown]
                                    + ([tr("gui.move.more_dirs", n=len(counts) - len(shown))]
@@ -1300,7 +1507,7 @@ class PickView(tk.Frame):
         if not messagebox.askyesno(APP_NAME, "\n\n".join(lines) + "\n\n" + tr("gui.move.confirm")):
             return
         try:
-            out, back = move_files(sel.decisions, reject_dir, recursive)
+            out, back = move_files(sel.decisions, reject_dir, recursive, folder=folder)
             write_csv(sel.decisions, folder / REPORT_NAME, root=folder)
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_NAME, tr("gui.move.error", error=exc))
@@ -1313,21 +1520,22 @@ class PickView(tk.Frame):
                 parts.append(tr("gui.move.done_out", n=n_out))
             if n_back:
                 parts.append(tr("gui.move.done_back", n=n_back))
-            where = tr("gui.move.where_each") if recursive else tr("gui.move.where", dir=reject_dir)
+            where = tr("gui.move.where_each") if reject_dir is None else tr("gui.move.where", dir=reject_dir)
             return tr("gui.move.sep").join(parts) + where
 
         self._status(text)
 
     def _restore(self) -> None:
         reject_dir, folder = self._reject_dir(), self._folder()
-        if reject_dir is None or folder is None:
+        if folder is None:
             return
         recursive = self._recursive()
         n = len(restore_files(folder, reject_dir, recursive, dry_run=True))
         if n == 0:
             messagebox.showinfo(APP_NAME, tr("gui.restore.nothing"))
             return
-        question = tr("gui.restore.confirm_each", n=n) if recursive else tr("gui.restore.confirm", dir=reject_dir, n=n)
+        question = (tr("gui.restore.confirm_each", n=n) if reject_dir is None
+                    else tr("gui.restore.confirm", dir=reject_dir, n=n))
         if not messagebox.askyesno(APP_NAME, question):
             return
         try:
@@ -1336,6 +1544,108 @@ class PickView(tk.Frame):
             messagebox.showerror(APP_NAME, tr("gui.restore.error", error=exc))
             return
         self._status(lambda: tr("gui.restore.done", n=restored))
+
+    # ------------------------------------------------------------------ 整理檔案
+
+    def _organize_keys(self) -> tuple[str, ...]:
+        return tuple(k for k in ORGANIZE_KEYS if self.organize_vars[k].get())
+
+    def _moved_to_rejects(self, folder: Path) -> bool:
+        """有淘汰片還在淘汰片資料夾裡：整理前後要先全部還原，不然搬移紀錄的原位置會對不上。"""
+        return bool(collect_files(folder, self._reject_dir(), self._recursive())[1])
+
+    def _organize(self) -> None:
+        """依勾選的參數把影像搬進子資料夾（例如 ASI2600MC/Ha/300s/），報表、手動覆寫跟著換位置。"""
+        folder = self._folder()
+        if folder is None or not self.frames or self.is_busy():
+            return
+        keys = self._organize_keys()
+        if not keys:
+            messagebox.showinfo(APP_NAME, tr("gui.organize.no_keys"))
+            return
+        if self._moved_to_rejects(folder):
+            messagebox.showinfo(APP_NAME, tr("gui.organize.restore_first"))
+            return
+        try:
+            tolerance = max(0.0, float(self.exposure_tol_var.get()))
+        except (tk.TclError, ValueError):
+            tolerance = EXPOSURE_TOLERANCE
+        plan = plan_organize(self.frames, folder, keys, tolerance)
+        if not plan:
+            messagebox.showinfo(APP_NAME, tr("gui.organize.nothing"))
+            return
+        counts: dict[str, int] = {}
+        for _, target in plan:
+            sub = frame_key(target.parent, folder)
+            counts[sub] = counts.get(sub, 0) + 1
+        shown = sorted(counts.items())[:12]
+        dirs = "\n".join([tr("gui.move.dir_line", dir=sub, n=n) for sub, n in shown]
+                         + ([tr("gui.move.more_dirs", n=len(counts) - len(shown))] if len(counts) > len(shown) else []))
+        if not messagebox.askyesno(APP_NAME, tr("gui.organize.confirm", n=len(plan), dirs=dirs)):
+            return
+        self.watch_var.set(False)
+        try:
+            done = organize(plan, folder)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(APP_NAME, tr("gui.organize.error", error=exc))
+            self._set_folder(folder)  # 搬到一半：重開資料夾，報表用檔名認回已經搬走的
+            return
+        self._relocate_frames({cur: target for cur, target in done})
+        n, k = len(done), len(counts)
+        self._status(lambda: tr("gui.organize.done", n=n, k=k))
+
+    def _undo_organize(self) -> None:
+        folder = self._folder()
+        if folder is None or self.is_busy():
+            return
+        n = pending_undo(folder)
+        if n == 0:
+            messagebox.showinfo(APP_NAME, tr("gui.organize.undo_nothing"))
+            return
+        if self._moved_to_rejects(folder):
+            messagebox.showinfo(APP_NAME, tr("gui.organize.restore_first"))
+            return
+        if not messagebox.askyesno(APP_NAME, tr("gui.organize.undo_confirm", n=n)):
+            return
+        self.watch_var.set(False)
+        try:
+            done = undo_organize(folder)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(APP_NAME, tr("gui.organize.error", error=exc))
+            self._set_folder(folder)
+            return
+        self._relocate_frames({cur: orig for cur, orig in done})
+        restored = len(done)
+        self._status(lambda: tr("gui.organize.undo_done", n=restored))
+
+    def _relocate_frames(self, moved: dict[Path, Path]) -> None:
+        """檔案搬了位置（{原本的絕對路徑: 新位置}）：量測結果、手動覆寫換到新位置，存回報表；
+        有影像在子資料夾裡就改成包含子資料夾。"""
+        folder = self._folder()
+        if folder is None:
+            return
+        new_keys: dict[str, str] = {}
+        for f in self.frames:
+            new = moved.get(Path(f.file).resolve())
+            if new is not None:
+                old = frame_key(f.file, folder)
+                f.file = str(new)
+                new_keys[old] = frame_key(new, folder)
+        self.overrides = {new_keys.get(k, k): v for k, v in self.overrides.items()}
+        self._previews.clear()
+        self._preview_name = None
+        self._clear_preview(tr("gui.preview.hint"))
+        files, home_of = collect_files(folder, None, True)
+        recursive = any("/" in frame_key(home_of.get(str(p), p), folder) for p in files)
+        self._setting_folder = True
+        try:
+            self.recursive_var.set(recursive)
+        finally:
+            self._setting_folder = False
+        if self.frames:
+            self._apply()
+            self._save_report()
+        self._update_buttons()
 
     def close(self) -> None:
         """取消背景工作、停掉排程。呼叫端接著 destroy() 這個 View；整合版關掉分頁後請在主執行緒 gc.collect()，

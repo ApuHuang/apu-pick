@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .grouping import EXPOSURE_TOLERANCE, group_frames
 from .metrics import FrameMetrics, is_image, measure
-from .mover import moved_away, restore_rejected, sync_files
+from .mover import moved_away, remove_empty_dirs, restore_rejected, sync_files
 from .scoring import ScoreConfig, ScoreResult
 from .selector import Decision, Reason, Thresholds, select, select_by_score
 
@@ -37,13 +37,18 @@ def skip_dir(name: str) -> bool:
     return name.startswith(".") or low == REJECT_DIR_NAME or any(w in low for w in SKIP_DIR_WORDS)
 
 
-def image_dirs(folder: Path, recursive: bool = False) -> list[Path]:
-    """要挑片的資料夾：folder 本身；子資料夾模式再加上底下所有沒被跳過的子資料夾（不限層數）。"""
+def image_dirs(folder: Path, recursive: bool = False, exclude: Path | None = None) -> list[Path]:
+    """要挑片的資料夾：folder 本身；子資料夾模式再加上底下所有沒被跳過的子資料夾（不限層數）。
+
+    exclude：自訂的淘汰片資料夾放在 folder 裡面時，不能把它當成要挑片的資料夾掃進來。
+    """
     if not recursive:
         return [folder]
+    ex = exclude.resolve() if exclude is not None else None
     dirs = []
     for dirpath, dirnames, _ in os.walk(folder):
-        dirnames[:] = sorted(d for d in dirnames if not skip_dir(d))
+        dirnames[:] = sorted(d for d in dirnames
+                             if not skip_dir(d) and (ex is None or (Path(dirpath) / d).resolve() != ex))
         dirs.append(Path(dirpath))
     return dirs
 
@@ -72,18 +77,32 @@ def frame_key(file: str | Path, root: Path | None) -> str:
     return p.name
 
 
+def reject_dir_for(directory: Path, folder: Path, reject_dir: Path | None, recursive: bool) -> Path:
+    """directory 裡的淘汰片搬去哪。
+
+    - 只開一層：reject_dir（沒指定就是 folder/rejected）
+    - 子資料夾模式、沒指定：directory 自己的 rejected/
+    - 子資料夾模式、有指定：reject_dir 底下照原本的子資料夾結構放（各晚的檔名常常重複，攤平會撞名）
+    """
+    if not recursive:
+        return reject_dir if reject_dir is not None else folder / REJECT_DIR_NAME
+    if reject_dir is None:
+        return directory / REJECT_DIR_NAME
+    rel = frame_key(directory, folder)
+    return reject_dir if rel == "." else reject_dir / rel
+
+
 def collect_files(folder: Path, reject_dir: Path | None = None,
                   recursive: bool = False) -> tuple[list[Path], dict[str, str]]:
     """回傳 (要量測的檔案, {目前位置: 原位置})。
 
     之前被搬去 reject 的也要算進同一批：門檻是相對整批算的，只看留下來的會越挑越嚴。
-    子資料夾模式下每個資料夾的淘汰片在它自己的 rejected/ 裡，reject_dir 不用。
+    每個資料夾的淘汰片在哪見 reject_dir_for。
     """
     files: list[Path] = []
     home_of: dict[str, str] = {}
-    for d in image_dirs(folder, recursive):
-        rd = d / REJECT_DIR_NAME if recursive or reject_dir is None else reject_dir
-        away = moved_away(rd, d)
+    for d in image_dirs(folder, recursive, reject_dir):
+        away = moved_away(reject_dir_for(d, folder, reject_dir, recursive), d)
         home_of.update({str(cur): str(home) for home, cur in away.items()})
         files += find_fits(d) + list(away.values())
     files.sort(key=lambda p: frame_key(home_of.get(str(p), p), folder))
@@ -91,17 +110,22 @@ def collect_files(folder: Path, reject_dir: Path | None = None,
 
 
 def move_files(decisions: list[Decision], reject_dir: Path | None, recursive: bool = False,
-               dry_run: bool = False) -> tuple[list[Path], list[Path]]:
-    """照挑片結果搬檔（見 mover.sync_files）；子資料夾模式下每張搬進自己所在資料夾的 rejected/。"""
+               dry_run: bool = False, folder: Path | None = None) -> tuple[list[Path], list[Path]]:
+    """照挑片結果搬檔（見 mover.sync_files）；子資料夾模式下每個資料夾分開搬，搬去哪見 reject_dir_for。
+
+    folder 是開啟的資料夾：子資料夾模式又指定了 reject_dir 時，用它算每張的相對位置。
+    """
     if not recursive:
         return sync_files(decisions, reject_dir, dry_run)
+    if reject_dir is not None and folder is None:
+        raise ValueError("子資料夾模式指定淘汰片資料夾時要給 folder")
     by_dir: dict[Path, list[Decision]] = {}
     for d in decisions:
         by_dir.setdefault(Path(d.metrics.file).resolve().parent, []).append(d)
     out: list[Path] = []
     back: list[Path] = []
     for parent, members in by_dir.items():
-        o, b = sync_files(members, parent / REJECT_DIR_NAME, dry_run)
+        o, b = sync_files(members, reject_dir_for(parent, folder or parent, reject_dir, True), dry_run)
         out += o
         back += b
     return out, back
@@ -109,13 +133,16 @@ def move_files(decisions: list[Decision], reject_dir: Path | None, recursive: bo
 
 def restore_files(folder: Path, reject_dir: Path | None, recursive: bool = False,
                   dry_run: bool = False) -> list[Path]:
-    """淘汰片全部搬回原位（見 mover.restore_rejected）；子資料夾模式下每個資料夾的 rejected/ 都搬回。"""
+    """淘汰片全部搬回原位（見 mover.restore_rejected）；子資料夾模式下每個資料夾的淘汰片都搬回。"""
     if not recursive:
         return restore_rejected(reject_dir, folder, dry_run)
     restored: list[Path] = []
-    for d in image_dirs(folder, True):
-        if (d / REJECT_DIR_NAME).is_dir():
-            restored += restore_rejected(d / REJECT_DIR_NAME, d, dry_run)
+    for d in image_dirs(folder, True, reject_dir):
+        rd = reject_dir_for(d, folder, reject_dir, True)
+        if rd.is_dir():
+            restored += restore_rejected(rd, d, dry_run)
+    if reject_dir is not None and not dry_run:
+        remove_empty_dirs(reject_dir)  # 照子資料夾結構建的空資料夾一起收掉
     return restored
 
 

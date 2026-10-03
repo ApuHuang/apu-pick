@@ -386,3 +386,170 @@ def test_gui_subfolders(tmp_path: Path, make_app, dialogs):
     app._restore()
     for files in nights.values():
         assert all(p.exists() for p in files["good"] + files["bad"])
+
+
+def _measured(make_app, folder: Path):
+    app = make_app(folder)
+    app.workers_var.set("1")
+    app._start_measure()
+    _pump(app.root, lambda: app.selection is not None and not app.is_busy())
+    return app
+
+
+def test_gui_slider_number_entry(tmp_path: Path, make_app):
+    from astro_light_selector.darkroom import ParameterSlider
+
+    make_session(tmp_path, n_good=3)
+    app = _measured(make_app, tmp_path)
+
+    slider = app.sliders["auto"]
+    slider.start_edit()
+    assert slider.entry.get() == "80"
+    slider.entry.delete(0, "end")
+    slider.entry.insert(0, "120 分")  # 超出範圍：夾到上限
+    slider.commit_edit()
+    assert app.pass_var.get() == 100 and slider.entry is None
+    slider.start_edit()
+    slider.entry.insert(0, "abc")  # 讀不出數字：照舊
+    slider.cancel_edit()
+    assert app.pass_var.get() == 100
+
+    # 整數的設定存回整數
+    var = tk.IntVar(master=app, value=2)
+    workers = ParameterSlider(app, app, "t", var, 1, 8, lambda v: f"{v:.0f}")
+    workers.start_edit()
+    workers.entry.delete(0, "end")
+    workers.entry.insert(0, "5.6")
+    workers.commit_edit()
+    assert var.get() == 6
+    workers.destroy()
+
+    # 權重打的是百分比：FWHM 改成 50%，其他幾項維持彼此的比例
+    fwhm = app.weight_sliders["fwhm"]
+    fwhm.start_edit()
+    assert fwhm.entry.get() == "35"
+    fwhm.entry.delete(0, "end")
+    fwhm.entry.insert(0, "50%")
+    fwhm.commit_edit()
+    weights = {m: v.get() for m, v in app.weight_vars.items()}
+    total = sum(weights.values())
+    assert weights["fwhm"] / total == pytest.approx(0.5, abs=1e-3)
+    assert weights["eccentricity"] / weights["n_stars"] == pytest.approx(30 / 20, abs=1e-3)
+    assert fwhm.value.cget("text") == "50%"
+
+
+def test_gui_keys_exposure_and_plot_click(tmp_path: Path, make_app):
+    from types import SimpleNamespace
+
+    files = make_session(tmp_path)
+    app = _measured(make_app, tmp_path)
+    # 保留 8 張 × 120 秒
+    assert app.metrics["kept_exposure"].value.cget("text") == "16m"
+    assert "保留片總曝光：16m（8 張）" in app.summary_text.get("1.0", "end")
+
+    # 趨勢圖點一下：切到清單、選取那一張
+    assert app._plot_order
+    i = next(i for i, d in enumerate(app._plot_order) if d.keep)
+    key = Path(app._plot_order[i].metrics.file).name
+    app.only_reject_var.set(True)  # 只看淘汰片時點到保留片：先關掉才找得到
+    app._plot_clicked(SimpleNamespace(button=1, inaxes=object(), xdata=float(i)))
+    assert app.nb.index("current") == 1 and app.tree.selection() == (key,)
+    assert not app.only_reject_var.get()
+
+    # K / X / A：選一張按 X 變成強制淘汰，接著選下一張
+    items = app.tree.get_children()
+    first, second = items[0], items[1]
+    app.tree.selection_set(first)
+    assert app._key_override(SimpleNamespace(state=0x4), "reject") is None  # 按著 Ctrl 不算
+    assert first not in app.overrides
+    app._key_override(SimpleNamespace(state=0), "reject")
+    assert app.overrides[first] == "reject" and app.tree.selection() == (second,)
+    app._key_override(SimpleNamespace(state=0), "keep")
+    assert app.overrides[second] == "keep"
+    app.tree.selection_set(first)
+    app._key_override(SimpleNamespace(state=0), None)
+    assert first not in app.overrides
+    # 在清單分頁時趨勢圖先不重畫，切回去才畫
+    assert app._plot_dirty
+    app.nb.select(0)
+    app.root.update()
+    assert not app._plot_dirty
+    assert files
+
+
+def test_gui_report_matched_by_file_name(tmp_path: Path, make_app):
+    import shutil
+
+    for name in ("n1", "n2"):
+        for p in make_session(tmp_path / name, n_good=3)["good"] + list((tmp_path / name).glob("bad_*.fits")):
+            p.rename(p.with_name(f"{name}_{p.name}"))
+    app = _measured(make_app, tmp_path)
+    assert app.recursive_var.get() and len(app.frames) == 12
+    key = "n1/n1_bad_cloud.fits"
+    app.tree.selection_set(key)
+    app._set_override("keep")
+
+    # 檔案被攤平到同一層：不包含子資料夾，量測結果和手動覆寫都依檔名認回
+    for name in ("n1", "n2"):
+        for p in (tmp_path / name).glob("*.fits"):
+            shutil.move(str(p), str(tmp_path / p.name))
+        shutil.rmtree(tmp_path / name)
+    app.open_folder(tmp_path)
+    assert not app.recursive_var.get()
+    assert len(app.selection.decisions) == 12
+    assert "12 張的位置變了" in app.status_var.get()
+    assert app.overrides == {"n1_bad_cloud.fits": "keep"}
+    assert "n1/" not in (tmp_path / "selection_report.csv").read_text(encoding="utf-8-sig")
+
+
+def test_gui_organize_and_undo(tmp_path: Path, make_app, dialogs):
+    from .synth import make_star_field, write_fits
+
+    make_session(tmp_path, n_good=4)
+    for i in range(3):  # 同一個資料夾混了另一台相機拍的 Ha
+        write_fits(tmp_path / f"ha_{i}.fits", make_star_field(seed=50 + i), filter="Ha", instrume="ZWO ASI2600MM Pro")
+    app = _measured(make_app, tmp_path)
+    app.tree.selection_set("ha_0.fits")
+    app._set_override("reject")
+    for key, var in app.organize_vars.items():
+        var.set(key in ("camera", "filter"))
+
+    app._organize()
+    assert "UnknownCamera/L：7 張" in dialogs["asked"][-1] and "ZWO ASI2600MM Pro/Ha：3 張" in dialogs["asked"][-1]
+    assert (tmp_path / "ZWO ASI2600MM Pro" / "Ha" / "ha_0.fits").is_file()
+    assert app.recursive_var.get() and len(app.selection.decisions) == 10
+    assert app.overrides == {"ZWO ASI2600MM Pro/Ha/ha_0.fits": "reject"}
+    assert "ZWO ASI2600MM Pro/Ha/ha_0.fits" in (tmp_path / "selection_report.csv").read_text(encoding="utf-8-sig")
+
+    # 重開資料夾照樣讀得到；有淘汰片搬走時要先還原才能復原整理
+    app.open_folder(tmp_path)
+    assert app.recursive_var.get() and len(app.selection.decisions) == 10
+    app._move()
+    app._undo_organize()
+    assert (tmp_path / "ZWO ASI2600MM Pro" / "Ha" / "rejected").is_dir()  # 沒動
+    app._restore()
+
+    app._undo_organize()
+    assert (tmp_path / "ha_0.fits").is_file() and not (tmp_path / "ZWO ASI2600MM Pro").exists()
+    assert not app.recursive_var.get() and app.overrides == {"ha_0.fits": "reject"}
+
+
+def test_gui_subfolders_custom_reject_dir(tmp_path: Path, make_app, dialogs, isolated_settings: Path):
+    nights = {name: make_session(tmp_path / "light" / name, n_good=4) for name in ("0101", "0202")}
+    app = _measured(make_app, tmp_path / "light")
+    target = tmp_path / "second pass"
+    app._set_reject(target)
+    assert "照原本的子資料夾結構放" in app.reject_label.cget("text")
+    app._move()
+    assert "0101：3 張" in dialogs["asked"][-1]
+    for name, files in nights.items():
+        assert sorted(p.name for p in (target / name).glob("*.fits")) == sorted(p.name for p in files["bad"])
+
+    # 每個資料夾分開記住：重開時找得到搬過去的片
+    app.open_folder(tmp_path / "light")
+    assert app.reject_var.get() == str(target) and len(app.selection.decisions) == 14
+    app._restore()
+    assert all(p.exists() for files in nights.values() for p in files["good"] + files["bad"])
+    assert not target.exists()
+    app._set_reject(None)
+    assert app._reject_dir() is None and app.reject_label.cget("text") == "各資料夾裡的 rejected"

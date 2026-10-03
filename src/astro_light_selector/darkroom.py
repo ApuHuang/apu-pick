@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import tkinter as tk
+import unicodedata
 from collections.abc import Callable
 from tkinter import font, ttk
 
@@ -247,20 +249,37 @@ class InfoButton(tk.Label):
         return "break"  # 不要連帶收合分組
 
 
+def parse_number(text: str) -> float | None:
+    """使用者打的數字：只取第一個數字，全形數字、後面帶單位（85 分、70%、2 秒）都可以；讀不出數字回傳 None。"""
+    match = re.search(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", unicodedata.normalize("NFKC", text))
+    return float(match.group()) if match else None
+
+
 class ParameterSlider(tk.Frame):
-    """滑桿列：標題、目前的值（等寬數字）、滑桿，對應 APU Astro 的 ParameterSlider。"""
+    """滑桿列：標題、目前的值（等寬數字）、滑桿，對應 APU Astro 的 ParameterSlider。
+
+    點右邊的數字可以直接打數字：Enter 或點別的地方套用、Esc 取消；超出範圍的夾到上下限，再對齊滑桿的步進。
+    顯示的數字跟滑桿的值不同時（例如權重顯示換算後的百分比），用 edit_text / on_entry 自己換算。
+    """
 
     def __init__(self, master: tk.Widget, app: "PickView", title: str, variable: tk.Variable, lo: float, hi: float,
-                 fmt: Callable[[float], str], step: float = 1.0):
+                 fmt: Callable[[float], str], step: float = 1.0, *,
+                 edit_text: Callable[[], str] | None = None, on_entry: Callable[[float], None] | None = None):
         D = Darkroom
         super().__init__(master, bg=D.panel)
-        self.var, self.fmt, self.step = variable, fmt, step
-        head = tk.Frame(self, bg=D.panel)
+        self.app = app
+        self.var, self.fmt, self.step, self.lo, self.hi = variable, fmt, step, lo, hi
+        self.edit_text, self.on_entry = edit_text, on_entry
+        self.enabled = True
+        self.entry: tk.Entry | None = None
+        self.head = head = tk.Frame(self, bg=D.panel)
         head.pack(fill="x")
         self.title = tk.Label(head, text=title, font=app.fonts.small, fg=D.secondary, bg=D.panel)
         self.title.pack(side="left")
-        self.value = tk.Label(head, font=app.fonts.mono, fg=D.label, bg=D.panel)
+        self.value = tk.Label(head, font=app.fonts.mono, fg=D.label, bg=D.panel, cursor="xterm")
         self.value.pack(side="right")
+        self.value.bind("<Button-1>", self.start_edit)
+        Tooltip(self.value, tr("gui.slider.edit_help"), app)
         self.scale = ttk.Scale(self, from_=lo, to=hi, variable=variable, style="Dark.Horizontal.TScale",
                                command=self._moved)
         self.scale.pack(fill="x", pady=(app.px(3), 0))
@@ -268,13 +287,64 @@ class ParameterSlider(tk.Frame):
         self._refresh()
 
     def set_enabled(self, enabled: bool) -> None:
+        self.enabled = enabled
         self.scale.state(["!disabled"] if enabled else ["disabled"])
-        self.value.configure(fg=Darkroom.label if enabled else "#6b6b6b")
+        self.value.configure(fg=Darkroom.label if enabled else "#6b6b6b", cursor="xterm" if enabled else "arrow")
 
     def _moved(self, value: str) -> None:
         snapped = round(float(value) / self.step) * self.step
         if abs(snapped - float(value)) > 1e-9:
             self.var.set(snapped)
+
+    def _number_text(self) -> str:
+        if self.edit_text is not None:
+            return self.edit_text()
+        try:
+            v = float(self.var.get())
+        except (tk.TclError, ValueError):
+            return ""
+        return f"{v:.0f}" if self.step >= 1 else f"{v:g}"
+
+    def start_edit(self, _event: object = None) -> None:
+        """把右邊的數字換成輸入框。"""
+        if self.entry is not None or not self.enabled:
+            return
+        D = Darkroom
+        text = self._number_text()
+        self.entry = entry = tk.Entry(self.head, width=max(5, len(text) + 2), font=self.app.fonts.mono,
+                                      justify="right", bg=D.control, fg=D.label, insertbackground=D.label,
+                                      relief="flat", highlightthickness=1, highlightcolor=D.accent,
+                                      highlightbackground=D.separator)
+        entry.insert(0, text)
+        entry.select_range(0, "end")
+        self.value.pack_forget()
+        entry.pack(side="right")
+        entry.focus_set()
+        for sequence in ("<Return>", "<KP_Enter>", "<FocusOut>"):
+            entry.bind(sequence, lambda _e: self.commit_edit())
+        entry.bind("<Escape>", lambda _e: self.cancel_edit())
+
+    def commit_edit(self) -> None:
+        """套用輸入框裡的數字；讀不出數字就照舊。"""
+        if self.entry is None:
+            return
+        value = parse_number(self.entry.get())
+        self.cancel_edit()
+        if value is None:
+            return
+        if self.on_entry is not None:
+            self.on_entry(value)
+            return
+        value = round(min(max(value, self.lo), self.hi) / self.step) * self.step
+        self.var.set(int(round(value)) if isinstance(self.var, tk.IntVar) else value)
+
+    def cancel_edit(self) -> None:
+        entry, self.entry = self.entry, None
+        if entry is None:
+            return
+        entry.destroy()
+        self.value.pack(side="right")
+        self._refresh()
 
     def _refresh(self) -> None:
         try:

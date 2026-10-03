@@ -218,7 +218,9 @@ _ZH: dict[str, str] = {
     "gui.group.rejects": "淘汰片",
     "gui.group.rejects.info": "淘汰的片只會搬到這個資料夾，不會刪除；按「全部還原」就會搬回原位。\n"
                               "用 PixInsight WBPP 的「+ Directory」加入整個 light 資料夾時，子資料夾也會被加進去，"
-                              "可以把這裡改到 light 資料夾外面。",
+                              "可以把這裡改到 light 資料夾外面。\n"
+                              "包含子資料夾時，預設搬到各資料夾裡的 rejected；改到別的地方時，會照原本的子資料夾結構放"
+                              "（例如 目的地／0101／DSC00001.ARW），方便集中再挑一次，全部還原也搬得回去。",
     "gui.reject_folder": "淘汰片資料夾",
     "gui.reject_each": "各資料夾裡的 rejected",
     "gui.tab.plot": "趨勢圖",
@@ -228,7 +230,9 @@ _ZH: dict[str, str] = {
     "gui.btn.force_keep": "強制保留",
     "gui.btn.force_reject": "強制淘汰",
     "gui.btn.clear_override": "改回自動",
-    "gui.override.help": "選取清單裡的片（{shortcut} / Shift 可多選）再按這裡，或在清單上按右鍵；手動決定會一直保留，重新量測或調門檻都不會改掉",
+    "gui.override.help": "選取清單裡的片（{shortcut} / Shift 可多選）再按這裡，或在清單上按右鍵；手動決定會一直保留，重新量測或調門檻都不會改掉。\n"
+                         "也可以在清單上直接按鍵：K 強制保留、X 強制淘汰、A 改回自動，只選一張時會接著跳到下一張"
+                         "（注音等輸入法要先切到英數）",
     "gui.metric.manual": "手動覆寫",
     "gui.preview.hint": "點清單裡的一張片，這裡會顯示預覽",
     "gui.preview.loading": "載入中…",
@@ -296,6 +300,41 @@ _ZH: dict[str, str] = {
     "gui.restore.confirm_each": "把各資料夾裡 rejected 的 {n} 張全部搬回原位？\n（手動放進去的也會一起搬回所在的資料夾）",
     "gui.restore.error": "搬回時發生錯誤：\n{error}",
     "gui.restore.done": "已搬回 {n} 張",
+    # 0.6
+    "gui.slider.edit_help": "點一下可以直接輸入數字",
+    "gui.btn.default_reject": "改回預設",
+    "gui.reject_mirror": "（照原本的子資料夾結構放）",
+    "gui.move.out_mirror": "把 {n} 張淘汰片搬到 {dir}，照原本的子資料夾結構放：",
+    "gui.metric.kept_exposure": "保留片總曝光",
+    "gui.metric.exposure_row": "{t}（{n} 張）",
+    "summary.exposure": "保留片總曝光：{t}（{n} 張）",
+    "summary.exposure_missing": "（其中 {n} 張沒有曝光時間，沒算進去）",
+    "summary.exposure_line": "  {label}：保留 {n} 張，{t}",
+    "summary.exposure_nights": "每晚：",
+    "gui.plot.coord": "{name}（點一下到清單看這張）",
+    "gui.status.loaded_renamed": "，其中 {n} 張的位置變了、依檔名認回",
+    "gui.group.organize": "整理檔案",
+    "gui.group.organize.info": "同一個資料夾混了多台相機、多個濾鏡或多種曝光時，依勾選的參數把影像搬進子資料夾，"
+                               "例如 ASI2600MC／Ha／300s。原本就在子資料夾裡的（例如每晚一個資料夾）會保留那一層。"
+                               "要先量測（或讀上次的結果）才能整理；量測結果、手動覆寫會跟著換位置，不用重新量測。\n\n"
+                               "整理完會自動打開「包含子資料夾」。按「復原整理」可以全部搬回原位。"
+                               "相機型號讀 FITS 的 INSTRUME、相機 RAW 裡相機寫的型號；讀不到的放在 UnknownCamera。",
+    "gui.organize.camera": "依相機",
+    "gui.organize.filter": "依濾鏡",
+    "gui.organize.exposure": "依曝光時間",
+    "gui.organize.gain": "依 ISO／增益",
+    "gui.organize.night": "每晚一個資料夾",
+    "gui.btn.organize": "整理…",
+    "gui.btn.undo_organize": "復原整理",
+    "gui.organize.no_keys": "請至少勾一個要依據的參數。",
+    "gui.organize.nothing": "檔案已經照這些參數放好了，不用搬。",
+    "gui.organize.restore_first": "有淘汰片還在淘汰片資料夾裡，請先按「全部還原」再整理或復原。",
+    "gui.organize.confirm": "把 {n} 張影像搬進這些資料夾：\n{dirs}\n\n量測結果、手動覆寫會跟著換位置。之後可以按「復原整理」搬回原位。",
+    "gui.organize.error": "整理時發生錯誤：\n{error}\n\n已經搬好的有記錄，可以用「復原整理」搬回。",
+    "gui.organize.done": "已把 {n} 張整理進 {k} 個資料夾",
+    "gui.organize.undo_nothing": "沒有可以搬回原位的整理紀錄。",
+    "gui.organize.undo_confirm": "把整理過的 {n} 張搬回原位？",
+    "gui.organize.undo_done": "已把 {n} 張搬回原位",
     "gui.close.confirm": "還在量測中，確定要關閉嗎？",
 }
 
@@ -464,7 +503,11 @@ _EN: dict[str, str] = {
     "gui.group.rejects": "Rejected Frames",
     "gui.group.rejects.info": "Rejected frames are only moved to this folder, never deleted; Restore All puts them back.\n"
                               "PixInsight WBPP's “+ Directory” also adds subfolders of the light folder, "
-                              "so you may want this folder outside the light folder.",
+                              "so you may want this folder outside the light folder.\n"
+                              "With Include Subfolders, rejects go to the rejected folder inside each folder by default; "
+                              "choose another folder and the subfolder structure is kept there (for example "
+                              "destination / 0101 / DSC00001.ARW), handy for a second pass. Restore All still puts "
+                              "everything back.",
     "gui.reject_folder": "Reject folder",
     "gui.reject_each": "The rejected folder inside each folder",
     "gui.tab.plot": "Trends",
@@ -475,7 +518,9 @@ _EN: dict[str, str] = {
     "gui.btn.force_reject": "Force Reject",
     "gui.btn.clear_override": "Back to Auto",
     "gui.override.help": "Select frames in the list ({shortcut} / Shift for several), then click here or right-click the list. "
-                         "Manual choices stick through re-measuring and threshold changes.",
+                         "Manual choices stick through re-measuring and threshold changes.\n"
+                         "Or press a key in the list: K force keep, X force reject, A back to auto; with one frame "
+                         "selected, the next one is selected afterwards.",
     "gui.metric.manual": "Manual overrides",
     "gui.preview.hint": "Select a frame in the list to preview it",
     "gui.preview.loading": "Loading…",
@@ -546,6 +591,45 @@ _EN: dict[str, str] = {
                                 "(Files you put there yourself also go back to that folder.)",
     "gui.restore.error": "An error occurred while restoring:\n{error}",
     "gui.restore.done": "Restored {n} frames",
+    # 0.6
+    "gui.slider.edit_help": "Click to type a number",
+    "gui.btn.default_reject": "Use Default",
+    "gui.reject_mirror": "(keeps the subfolder structure)",
+    "gui.move.out_mirror": "Move {n} rejected frames to {dir}, keeping the subfolder structure:",
+    "gui.metric.kept_exposure": "Kept exposure",
+    "gui.metric.exposure_row": "{t} ({n})",
+    "summary.exposure": "Kept exposure: {t} ({n} frames)",
+    "summary.exposure_missing": "({n} of them have no exposure time and aren't counted)",
+    "summary.exposure_line": "  {label}: {n} kept, {t}",
+    "summary.exposure_nights": "Per night:",
+    "gui.plot.coord": "{name} (click to show it in the list)",
+    "gui.status.loaded_renamed": "; {n} had moved and were matched by file name",
+    "gui.group.organize": "Organize Files",
+    "gui.group.organize.info": "When one folder mixes cameras, filters or exposures, move the images into subfolders by "
+                               "the settings you tick, for example ASI2600MC / Ha / 300s. Images already in subfolders "
+                               "(for example one folder per night) keep that level. Measure first (or load the last "
+                               "results); measurements and manual overrides follow the files, so there's no need to "
+                               "measure again.\n\nInclude Subfolders turns on afterwards. Undo Organize moves everything "
+                               "back. The camera model comes from INSTRUME in FITS files and from the model the camera writes into "
+                               "RAW files; frames without one go to UnknownCamera.",
+    "gui.organize.camera": "By Camera",
+    "gui.organize.filter": "By Filter",
+    "gui.organize.exposure": "By Exposure",
+    "gui.organize.gain": "By ISO / Gain",
+    "gui.organize.night": "One Folder per Night",
+    "gui.btn.organize": "Organize…",
+    "gui.btn.undo_organize": "Undo Organize",
+    "gui.organize.no_keys": "Tick at least one setting to organize by.",
+    "gui.organize.nothing": "Files are already organized this way. Nothing to move.",
+    "gui.organize.restore_first": "Some rejected frames are still in the reject folder. Use “Restore All” first.",
+    "gui.organize.confirm": "Move {n} images into these folders:\n{dirs}\n\nMeasurements and manual overrides follow "
+                            "the files. You can move them back later with “Undo Organize”.",
+    "gui.organize.error": "An error occurred while organizing:\n{error}\n\n"
+                          "Files already moved are recorded; “Undo Organize” moves them back.",
+    "gui.organize.done": "Organized {n} images into {k} folders",
+    "gui.organize.undo_nothing": "There's nothing organized to move back.",
+    "gui.organize.undo_confirm": "Move the {n} organized images back to where they were?",
+    "gui.organize.undo_done": "Moved {n} images back",
     "gui.close.confirm": "Measuring is still running. Close anyway?",
 }
 
