@@ -26,6 +26,7 @@ from PIL import Image, ImageTk
 from . import __version__
 from .darkroom import (IS_MAC, Darkroom, Fonts, MetricRow, PanelGroup, ParameterSlider, ParameterToggle, Segmented,
                        Tooltip, _short_path, dark_title_bar, enable_dpi_awareness, setup_style)
+from .detail import draw_histogram, histogram_stats, info_lines
 from .grouping import EXPOSURE_TOLERANCE, assign_nights
 from .i18n import APP_NAME, APP_SUBTITLE, LANGUAGES, get_language, set_language, tr, tr_metric
 from .metrics import FrameMetrics, is_image
@@ -198,6 +199,11 @@ class PickView(tk.Frame):
         self._preview_name: str | None = None
         self._preview_center = (0.5, 0.5)
         self._preview_job: str | None = None
+        # 預覽區的分頁（預覽／資訊／直方圖），直方圖看拉伸後或拉伸前、分色或合成亮度；都記住上次選的
+        saved = load_settings()
+        self.pane_var = tk.StringVar(value=saved.get("preview_pane", "preview"))
+        self.hist_stretch_var = tk.StringVar(value=saved.get("hist_stretch", "stretched"))
+        self.hist_channel_var = tk.StringVar(value=saved.get("hist_channels", "rgb"))
         self.folder_var = tk.StringVar()
         self.reject_var = tk.StringVar()
         self.status_var = tk.StringVar()
@@ -228,6 +234,9 @@ class PickView(tk.Frame):
         for var in self.weight_vars.values():
             var.trace_add("write", lambda *_: self._update_weight_view())
         self.only_reject_var.trace_add("write", lambda *_: self._fill_table())
+        self.pane_var.trace_add("write", lambda *_: self._pane_changed())
+        self.hist_stretch_var.trace_add("write", lambda *_: self._hist_option_changed())
+        self.hist_channel_var.trace_add("write", lambda *_: self._hist_option_changed())
         for var in self.organize_vars.values():
             var.trace_add("write", lambda *_: save_settings(organize_keys=list(self._organize_keys())))
         self.watch_var.trace_add("write", lambda *_: self._toggle_watch())
@@ -577,14 +586,111 @@ class PickView(tk.Frame):
         self.preview_title.pack(fill="x", padx=self.px(10), pady=(self.px(8), 0))
         self.preview_sky = tk.Label(pane, font=self.fonts.small, fg=D.secondary, bg=D.list_bg, anchor="w")
         self.preview_sky.pack(fill="x", padx=self.px(10), pady=(0, self.px(4)))
-        self.preview_thumb = tk.Label(pane, bg=D.list_bg, fg=D.secondary, font=self.fonts.small,
+        Segmented(pane, self, [("preview", tr("gui.pane.preview")), ("info", tr("gui.pane.info")),
+                               ("hist", tr("gui.pane.hist"))], self.pane_var, stretch=True).pack(
+            fill="x", padx=self.px(10), pady=(self.px(2), self.px(8)))
+        self.pane_frames = {key: tk.Frame(pane, bg=D.list_bg) for key in ("preview", "info", "hist")}
+
+        page = self.pane_frames["preview"]
+        self.preview_thumb = tk.Label(page, bg=D.list_bg, fg=D.secondary, font=self.fonts.small,
                                       text=tr("gui.preview.hint"), cursor="crosshair")
         self.preview_thumb.pack(padx=self.px(10))
         self.preview_thumb.bind("<Button-1>", self._move_closeup)
-        self.preview_caption = tk.Label(pane, font=self.fonts.small, fg=D.secondary, bg=D.list_bg, anchor="w")
+        self.preview_caption = tk.Label(page, font=self.fonts.small, fg=D.secondary, bg=D.list_bg, anchor="w")
         self.preview_caption.pack(fill="x", padx=self.px(10), pady=(self.px(8), self.px(4)))
-        self.preview_closeup = tk.Label(pane, bg=D.list_bg)
+        self.preview_closeup = tk.Label(page, bg=D.list_bg)
         self.preview_closeup.pack(padx=self.px(10))
+
+        # 資訊：唯讀的文字，標籤在左、值在右（用 Tab 對齊）
+        page = self.pane_frames["info"]
+        self.info_text = tk.Text(page, wrap="word", relief="flat", bg=D.list_bg, fg=D.label, font=self.fonts.small,
+                                 padx=self.px(10), pady=self.px(2), highlightthickness=0, cursor="arrow",
+                                 tabs=(self.px(96),), spacing1=self.px(1), spacing3=self.px(1))
+        self.info_text.tag_configure("head", font=self.fonts.bold, foreground=D.label, spacing1=self.px(4))
+        self.info_text.tag_configure("dim", foreground=D.secondary)
+        self.info_text.tag_configure("bad", foreground=D.reject)
+        self.info_text.pack(fill="both", expand=True)
+        self.info_text.configure(state="disabled")
+
+        # 直方圖：這一張照片的；上面切換拉伸後／拉伸前、分色／亮度，下面列每個通道的數字
+        page = self.pane_frames["hist"]
+        row = tk.Frame(page, bg=D.list_bg)
+        row.pack(fill="x", padx=self.px(10))
+        Segmented(row, self, [("stretched", tr("gui.hist.stretched")), ("linear", tr("gui.hist.linear"))],
+                  self.hist_stretch_var).pack(side="left")
+        Segmented(row, self, [("rgb", tr("gui.hist.rgb")), ("lum", tr("gui.hist.lum"))],
+                  self.hist_channel_var).pack(side="right")
+        self.hist_stats = tk.Text(page, height=6, relief="flat", bg=D.list_bg, fg=D.label, font=self.fonts.mono,
+                                  padx=self.px(10), highlightthickness=0, cursor="arrow",
+                                  tabs=tuple(v for x in (130, 210, 290, 390) for v in (self.px(x), "right")))
+        self.hist_stats.tag_configure("dim", foreground=D.secondary, font=self.fonts.small)
+        self.hist_stats.pack(side="bottom", fill="x", pady=(0, self.px(6)))
+        self.hist_stats.configure(state="disabled")
+        self.hist_fig = Figure(figsize=(4.2, 3.6), facecolor=D.list_bg)
+        self.hist_canvas = FigureCanvasTkAgg(self.hist_fig, master=page)
+        self.hist_canvas.get_tk_widget().configure(bg=D.list_bg, highlightthickness=0)
+        self.hist_canvas.get_tk_widget().pack(fill="both", expand=True, padx=self.px(4), pady=(self.px(4), 0))
+        self._show_pane()
+
+    def _hist_option_changed(self) -> None:
+        save_settings(hist_stretch=self.hist_stretch_var.get(), hist_channels=self.hist_channel_var.get())
+        self._refresh_detail()
+
+    def _pane_changed(self) -> None:
+        save_settings(preview_pane=self.pane_var.get())
+        self._show_pane()
+
+    def _show_pane(self) -> None:
+        """預覽區只顯示選到的那一頁；資訊和直方圖切過去時才產生內容。"""
+        current = self.pane_var.get() if self.pane_var.get() in self.pane_frames else "preview"
+        for key, frame in self.pane_frames.items():
+            if key == current:
+                frame.pack(fill="both", expand=True)
+            else:
+                frame.pack_forget()
+        self._refresh_detail()
+
+    def _decision(self, key: str):
+        folder = self._folder()
+        if self.selection is None:
+            return None
+        return next((d for d in self.selection.decisions if frame_key(d.metrics.file, folder) == key), None)
+
+    def _refresh_detail(self) -> None:
+        """更新「資訊」或「直方圖」頁（看得到的那一頁）。"""
+        pane = self.pane_var.get()
+        if pane not in ("info", "hist"):
+            return
+        key = self._preview_name
+        d = self._decision(key) if key else None
+        sel = self.selection
+        group = [x for x in sel.decisions if x.group == d.group] if d is not None and sel is not None else []
+        result = sel.results.get(d.group) if d is not None and sel is not None else None
+        threshold = sel.thresholds.get(d.group) if d is not None and sel is not None else None
+        preview = self._previews.get(key) if key else None
+        if pane == "info":
+            text = self.info_text
+            text.configure(state="normal")
+            text.delete("1.0", "end")
+            if d is None:
+                text.insert("end", tr("gui.preview.hint"), "dim")
+            else:
+                weights = self._weights() or {}
+                total = sum(weights.values()) or 1.0
+                for line, tag in info_lines(d, result, {m: w / total for m, w in weights.items()}, group, preview,
+                                            self._sky_text(key), threshold):
+                    text.insert("end", line, tag)
+            text.configure(state="disabled")
+        else:
+            draw_histogram(self.hist_fig, preview if key else None, stretched=self.hist_stretch_var.get() != "linear",
+                           luminance=self.hist_channel_var.get() == "lum")
+            self.hist_canvas.draw_idle()
+            text = self.hist_stats
+            text.configure(state="normal")
+            text.delete("1.0", "end")
+            for line, tag in histogram_stats(preview):
+                text.insert("end", line, tag)
+            text.configure(state="disabled")
 
     def _schedule_preview(self) -> None:
         if self._preview_job is not None:
@@ -612,6 +718,7 @@ class PickView(tk.Frame):
         self._preview_name = name
         self.preview_title.configure(text=name)
         self.preview_sky.configure(text=self._sky_text(name))
+        self._refresh_detail()
         if name in self._previews:
             self._previews.move_to_end(name)
             self._show_preview()
@@ -1140,6 +1247,7 @@ class PickView(tk.Frame):
                 self._previews.popitem(last=False)
             if name == self._preview_name:
                 self._show_preview()
+                self._refresh_detail()
             return
         if kind == "preview_error":
             if event[1] == self._preview_name:

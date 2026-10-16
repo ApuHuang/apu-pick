@@ -553,3 +553,39 @@ def test_gui_subfolders_custom_reject_dir(tmp_path: Path, make_app, dialogs, iso
     assert not target.exists()
     app._set_reject(None)
     assert app._reject_dir() is None and app.reject_label.cget("text") == "各資料夾裡的 rejected"
+
+
+def test_gui_info_and_histogram_panes(tmp_path: Path, make_app, isolated_settings: Path):
+    import json
+
+    files = make_session(tmp_path)
+    app = _measured(make_app, tmp_path)
+    app.nb.select(1)
+    bad = files["bad"][0].name
+    app.tree.selection_set(bad)
+    _pump(app.root, lambda: bad in app._previews)
+
+    # 資訊：拍攝、結果、分數拆解、跟同組比
+    app.pane_var.set("info")
+    text = app.info_text.get("1.0", "end")
+    for word in ("拍攝", "曝光\t120 s", "濾鏡\tL", "判定\t淘汰", "組內排名", "分數拆解", "合計", "跟同組比"):
+        assert word in text, word
+    assert "影像尺寸" in text  # 檔頭資訊：預覽讀好之後才有
+    assert json.loads((isolated_settings / "settings.json").read_text(encoding="utf-8"))["preview_pane"] == "info"
+
+    # 直方圖：這一張照片的；預設拉伸後、分色，可以換成拉伸前、合成亮度，下面列每個通道的數字
+    app.pane_var.set("hist")
+    assert len(app.hist_fig.axes) == 1
+    assert app._previews[bad].saturation == 65535 and app._previews[bad].stretched_hist.shape == (1, 256)
+    assert "拉伸" in app.hist_fig.axes[0].get_xlabel()
+    stats = app.hist_stats.get("1.0", "end")
+    assert stats.startswith("ADU") and "\nL\t" in stats
+    app.hist_stretch_var.set("linear")
+    assert app.hist_fig.axes[0].get_xscale() == "log"
+    assert json.loads((isolated_settings / "settings.json").read_text(encoding="utf-8"))["hist_stretch"] == "linear"
+
+    # 換一張：資訊跟著換
+    good = files["good"][0].name
+    app.pane_var.set("info")
+    app.tree.selection_set(good)
+    _pump(app.root, lambda: "判定\t保留" in app.info_text.get("1.0", "end"))

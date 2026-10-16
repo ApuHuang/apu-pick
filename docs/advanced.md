@@ -229,7 +229,8 @@ apu-pick/
 │   ├── metrics.py     # 單張影像的品質量測
 │   ├── rawfile.py     # 單眼 RAW 讀取
 │   ├── sky.py         # 目標仰角、月亮（從 header 算）
-│   ├── preview.py     # 預覽縮圖（自動拉伸）
+│   ├── preview.py     # 預覽縮圖（自動拉伸）、亮度直方圖
+│   ├── detail.py      # 清單旁的「資訊」「直方圖」內容
 │   ├── scoring.py     # 最佳範本評分
 │   ├── grouping.py    # 依濾鏡 / 曝光 / ISO／增益 / 夜晚 / 子資料夾分組
 │   ├── selector.py    # 保留 / 淘汰判斷
