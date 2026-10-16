@@ -32,6 +32,8 @@
 
 ![清單與預覽](docs/screenshot-list.png)
 
+![資訊與直方圖](docs/screenshot-detail.png)
+
 ## 下載
 
 到 [Releases 頁面](../../releases/latest) 下載對應的檔案，不用另外安裝 Python：
