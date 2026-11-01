@@ -10,6 +10,7 @@ import math
 import numpy as np
 from matplotlib.figure import Figure
 
+from .field import FieldResult
 from .i18n import tr
 from .plot import DARK
 from .preview import Preview
@@ -220,4 +221,83 @@ def histogram_stats(preview: Preview | None) -> list[Line]:
         r, g, b = (st["median"] for st in preview.stats)
         if g > 0:
             lines.append((tr("gui.hist.cast", r=r / g, b=b / g) + "\n", "dim"))
+    return lines
+
+
+def draw_field(fig: Figure, result: FieldResult | None, message: str = "") -> None:
+    """像場：3×3 的 FWHM（顏色越亮越大，數字標在格子裡），白線是星點拉長的方向，長度代表拉多長。"""
+    from .field import GRID
+
+    theme = DARK
+    fig.clear()
+    fig.set_facecolor("#141414")
+    ax = fig.subplots()
+    ax.set_facecolor(theme["axes"])
+    for spine in ax.spines.values():
+        spine.set_color(theme["spine"])
+    ax.set_xticks([])
+    ax.set_yticks([])
+    if result is None:
+        ax.text(0.5, 0.5, message, color=theme["muted"], ha="center", va="center", transform=ax.transAxes,
+                fontsize=8, wrap=True)
+        return
+    values = np.array([[c.fwhm if c else np.nan for c in row] for row in result.cells])
+    finite = values[np.isfinite(values)]
+    lo, hi = (float(finite.min()), float(finite.max())) if len(finite) else (0.0, 1.0)
+    if hi - lo < 0.05:
+        lo, hi = lo - 0.05, hi + 0.05
+    image = ax.imshow(values, cmap="magma", vmin=lo - (hi - lo) * 0.6, vmax=hi, extent=(0, GRID, GRID, 0))
+    for r, row in enumerate(result.cells):
+        for c, cell in enumerate(row):
+            cx, cy = c + 0.5, r + 0.5
+            if cell is None:
+                ax.text(cx, cy, "—", color=theme["muted"], ha="center", va="center", fontsize=9)
+                continue
+            # 亮的格子（FWHM 大）用深色的線和字，不然看不到
+            red, green, blue, _ = image.cmap(image.norm(cell.fwhm))
+            ink = "#1a1a1a" if 0.299 * red + 0.587 * green + 0.114 * blue > 0.6 else "white"
+            half = 0.42 * min(1.0, cell.eccentricity) * cell.alignment
+            dx, dy = math.cos(cell.angle) * half, math.sin(cell.angle) * half
+            ax.plot([cx - dx, cx + dx], [cy - dy, cy + dy], color=ink, linewidth=2, solid_capstyle="round")
+            ax.text(cx, r + 0.88, f"{cell.fwhm:.2f}", color=ink, ha="center", va="center", fontsize=8)
+    for i in range(1, GRID):
+        ax.axhline(i, color=theme["spine"], linewidth=0.8)
+        ax.axvline(i, color=theme["spine"], linewidth=0.8)
+    ax.set_xlim(0, GRID)
+    ax.set_ylim(GRID, 0)
+    fig.tight_layout(pad=0.6)
+
+
+def _level(tilt: float) -> str:
+    return tr("field.level.ok") if tilt < 10 else tr("field.level.mild") if tilt < 20 else tr("field.level.bad")
+
+
+def field_lines(result: FieldResult | None) -> list[Line]:
+    """像場圖下面的文字：傾斜、場曲、中心與四角的 FWHM、星點拉長的樣子、量不準的提醒。"""
+    if result is None:
+        return []
+    lines: list[Line] = []
+
+    def row(label: str, value: str, tag: str = "") -> None:
+        lines.append((f"{label}\t{value}\n", tag))
+
+    tilt, curvature, corners, center = result.tilt, result.curvature, result.corners, result.center
+    if tilt is not None:
+        row(tr("field.tilt"), tr("field.tilt_value", v=tilt, corner=tr(f"field.corner.{result.worst_corner}"),
+                                 level=_level(tilt)), "bad" if tilt >= 20 else "")
+    if curvature is not None:
+        row(tr("field.curvature"), tr("field.curv_value", v=curvature,
+                                      dir=tr("field.bigger") if curvature >= 0 else tr("field.smaller")),
+            "bad" if abs(curvature) >= 20 else "")
+    if center is not None:
+        row(tr("field.center"), f"{center.fwhm:.2f} px")
+    if corners is not None:
+        row(tr("field.corners"), tr("field.corners_value", **{k: c.fwhm for k, c in corners.items()}))
+    pattern = result.corner_pattern()
+    row(tr("field.pattern"), tr(f"field.pattern.{pattern or 'none'}"))
+    lines.append(((tr("field.frames", n=result.n_frames) if result.n_frames > 1 else tr("field.frames_single"))
+                  + "\n", "dim"))
+    lines.append((tr("field.legend") + "\n", "dim"))
+    for note in result.notes:
+        lines.append((tr(note) + "\n", "bad"))
     return lines

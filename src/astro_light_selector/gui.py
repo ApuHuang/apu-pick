@@ -26,7 +26,8 @@ from PIL import Image, ImageTk
 from . import __version__
 from .darkroom import (IS_MAC, Darkroom, Fonts, MetricRow, PanelGroup, ParameterSlider, ParameterToggle, Segmented,
                        Tooltip, _short_path, dark_title_bar, enable_dpi_awareness, setup_style)
-from .detail import draw_histogram, histogram_stats, info_lines
+from .detail import draw_field, draw_histogram, field_lines, histogram_stats, info_lines
+from .field import analyze_frame, combine
 from .grouping import EXPOSURE_TOLERANCE, assign_nights
 from .i18n import APP_NAME, APP_SUBTITLE, LANGUAGES, get_language, set_language, tr, tr_metric
 from .metrics import FrameMetrics, is_image
@@ -49,6 +50,8 @@ LOGO = ASSETS / "icon_128.png"
 OPEN_SHORTCUT = "⌘O" if IS_MAC else "Ctrl+O"
 # 清單多選時按住的鍵（Mac 的 Control+點是右鍵）
 MULTI_SELECT_KEY = "⌘" if IS_MAC else "Ctrl"
+# 像場「平均」用最好的幾張保留片
+FIELD_AVERAGE_FRAMES = 5
 # 清單上的快速挑片鍵（K 保留、X 淘汰、A 改回自動）只在沒按修飾鍵時才算：Control、Mac 的 ⌘ / Option、Windows 的 Alt
 MODIFIER_MASK = 0x4 | 0x8 | 0x10 if IS_MAC else 0x4 | 0x20000
 
@@ -204,6 +207,10 @@ class PickView(tk.Frame):
         self.pane_var = tk.StringVar(value=saved.get("preview_pane", "preview"))
         self.hist_stretch_var = tk.StringVar(value=saved.get("hist_stretch", "stretched"))
         self.hist_channel_var = tk.StringVar(value=saved.get("hist_channels", "rgb"))
+        # 像場：看單張或最好幾張保留片的平均；量過的留著（換資料夾才清掉）
+        self.field_mode_var = tk.StringVar(value=saved.get("field_mode", "single"))
+        self._field_cache: dict[str, object] = {}
+        self._field_running: set[str] = set()
         self.folder_var = tk.StringVar()
         self.reject_var = tk.StringVar()
         self.status_var = tk.StringVar()
@@ -237,6 +244,7 @@ class PickView(tk.Frame):
         self.pane_var.trace_add("write", lambda *_: self._pane_changed())
         self.hist_stretch_var.trace_add("write", lambda *_: self._hist_option_changed())
         self.hist_channel_var.trace_add("write", lambda *_: self._hist_option_changed())
+        self.field_mode_var.trace_add("write", lambda *_: self._field_mode_changed())
         for var in self.organize_vars.values():
             var.trace_add("write", lambda *_: save_settings(organize_keys=list(self._organize_keys())))
         self.watch_var.trace_add("write", lambda *_: self._toggle_watch())
@@ -587,9 +595,9 @@ class PickView(tk.Frame):
         self.preview_sky = tk.Label(pane, font=self.fonts.small, fg=D.secondary, bg=D.list_bg, anchor="w")
         self.preview_sky.pack(fill="x", padx=self.px(10), pady=(0, self.px(4)))
         Segmented(pane, self, [("preview", tr("gui.pane.preview")), ("info", tr("gui.pane.info")),
-                               ("hist", tr("gui.pane.hist"))], self.pane_var, stretch=True).pack(
-            fill="x", padx=self.px(10), pady=(self.px(2), self.px(8)))
-        self.pane_frames = {key: tk.Frame(pane, bg=D.list_bg) for key in ("preview", "info", "hist")}
+                               ("hist", tr("gui.pane.hist")), ("field", tr("gui.pane.field"))], self.pane_var,
+                  stretch=True).pack(fill="x", padx=self.px(10), pady=(self.px(2), self.px(8)))
+        self.pane_frames = {key: tk.Frame(pane, bg=D.list_bg) for key in ("preview", "info", "hist", "field")}
 
         page = self.pane_frames["preview"]
         self.preview_thumb = tk.Label(page, bg=D.list_bg, fg=D.secondary, font=self.fonts.small,
@@ -630,11 +638,86 @@ class PickView(tk.Frame):
         self.hist_canvas = FigureCanvasTkAgg(self.hist_fig, master=page)
         self.hist_canvas.get_tk_widget().configure(bg=D.list_bg, highlightthickness=0)
         self.hist_canvas.get_tk_widget().pack(fill="both", expand=True, padx=self.px(4), pady=(self.px(4), 0))
+
+        # 像場：3×3 的 FWHM 與星點拉長方向，下面是傾斜、場曲的數字
+        page = self.pane_frames["field"]
+        Segmented(page, self, [("single", tr("field.single")),
+                               ("average", tr("field.average", n=FIELD_AVERAGE_FRAMES))],
+                  self.field_mode_var).pack(anchor="w", padx=self.px(10))
+        self.field_text = tk.Text(page, height=9, wrap="word", relief="flat", bg=D.list_bg, fg=D.label,
+                                  font=self.fonts.small, padx=self.px(10), highlightthickness=0, cursor="arrow",
+                                  tabs=(self.px(96),))
+        self.field_text.tag_configure("dim", foreground=D.secondary)
+        self.field_text.tag_configure("bad", foreground=D.reject)
+        self.field_text.pack(side="bottom", fill="x", pady=(0, self.px(6)))
+        self.field_text.configure(state="disabled")
+        self.field_fig = Figure(figsize=(4.2, 3.0), facecolor=D.list_bg)
+        self.field_canvas = FigureCanvasTkAgg(self.field_fig, master=page)
+        self.field_canvas.get_tk_widget().configure(bg=D.list_bg, highlightthickness=0)
+        self.field_canvas.get_tk_widget().pack(fill="both", expand=True, padx=self.px(4), pady=(self.px(4), 0))
         self._show_pane()
 
     def _hist_option_changed(self) -> None:
         save_settings(hist_stretch=self.hist_stretch_var.get(), hist_channels=self.hist_channel_var.get())
         self._refresh_detail()
+
+    def _field_mode_changed(self) -> None:
+        save_settings(field_mode=self.field_mode_var.get())
+        self._refresh_detail()
+
+    def _field_targets(self, key: str | None) -> tuple[str, list[str]] | None:
+        """像場要量哪幾張：(快取代號, [片的代號…])。單張是選到的那張；平均是分數最高的幾張保留片。"""
+        if self.field_mode_var.get() != "average":
+            return (key, [key]) if key else None
+        if self.selection is None:
+            return None
+        folder = self._folder()
+        kept = sorted((d for d in self.selection.decisions if d.keep and d.score is not None),
+                      key=lambda d: -d.score)[:FIELD_AVERAGE_FRAMES]
+        keys = [frame_key(d.metrics.file, folder) for d in kept]
+        return ("avg:" + "|".join(keys), keys) if keys else None
+
+    def _show_field(self, key: str | None) -> None:
+        """「像場」頁：量過就畫出來，還沒量就在背景量（單張幾秒，平均要多等一下）。"""
+        targets = self._field_targets(key)
+        result, message = None, tr("gui.preview.hint")
+        if targets is None and self.field_mode_var.get() == "average":
+            message = tr("field.no_frames")
+        elif targets is not None:
+            cache_key, keys = targets
+            result = self._field_cache.get(cache_key)
+            if isinstance(result, str):  # 量測失敗的訊息
+                result, message = None, result
+            elif result is None:
+                message = tr("field.measuring")
+                if cache_key not in self._field_running:
+                    self._start_field(cache_key, keys)
+        draw_field(self.field_fig, result, message)
+        self.field_canvas.draw_idle()
+        text = self.field_text
+        text.configure(state="normal")
+        text.delete("1.0", "end")
+        for line, tag in field_lines(result):
+            text.insert("end", line, tag)
+        text.configure(state="disabled")
+
+    def _start_field(self, cache_key: str, keys: list[str]) -> None:
+        paths = [self._current_path(k) for k in keys]
+        paths = [p for p in paths if p is not None]
+        if not paths:
+            self._field_cache[cache_key] = tr("gui.preview.missing")
+            return
+        self._field_running.add(cache_key)
+
+        def work() -> None:
+            try:
+                results = [analyze_frame(p) for p in paths]
+                self.events.put(("field", cache_key, results[0] if len(results) == 1 and not
+                                 cache_key.startswith("avg:") else combine(results)))
+            except Exception as exc:  # noqa: BLE001
+                self.events.put(("field", cache_key, tr("field.failed", error=exc)))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _pane_changed(self) -> None:
         save_settings(preview_pane=self.pane_var.get())
@@ -659,9 +742,12 @@ class PickView(tk.Frame):
     def _refresh_detail(self) -> None:
         """更新「資訊」或「直方圖」頁（看得到的那一頁）。"""
         pane = self.pane_var.get()
-        if pane not in ("info", "hist"):
+        if pane not in ("info", "hist", "field"):
             return
         key = self._preview_name
+        if pane == "field":
+            self._show_field(key)
+            return
         d = self._decision(key) if key else None
         sel = self.selection
         group = [x for x in sel.decisions if x.group == d.group] if d is not None and sel is not None else []
@@ -1061,6 +1147,7 @@ class PickView(tk.Frame):
         self.frames, self.selection = [], None
         self.overrides = read_overrides(folder / REPORT_NAME) if folder.is_dir() else {}
         self._previews.clear()
+        self._field_cache.clear()
         self._preview_name = None
         self._clear_preview(tr("gui.preview.hint"))
         self._fill_table()
@@ -1247,6 +1334,13 @@ class PickView(tk.Frame):
                 self._previews.popitem(last=False)
             if name == self._preview_name:
                 self._show_preview()
+                self._refresh_detail()
+            return
+        if kind == "field":
+            _, cache_key, result = event
+            self._field_running.discard(cache_key)
+            self._field_cache[cache_key] = result
+            if self.pane_var.get() == "field":
                 self._refresh_detail()
             return
         if kind == "preview_error":
@@ -1741,6 +1835,7 @@ class PickView(tk.Frame):
                 new_keys[old] = frame_key(new, folder)
         self.overrides = {new_keys.get(k, k): v for k, v in self.overrides.items()}
         self._previews.clear()
+        self._field_cache.clear()
         self._preview_name = None
         self._clear_preview(tr("gui.preview.hint"))
         files, home_of = collect_files(folder, None, True)

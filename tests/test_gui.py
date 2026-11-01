@@ -589,3 +589,25 @@ def test_gui_info_and_histogram_panes(tmp_path: Path, make_app, isolated_setting
     app.pane_var.set("info")
     app.tree.selection_set(good)
     _pump(app.root, lambda: "判定\t保留" in app.info_text.get("1.0", "end"))
+
+
+def test_gui_field_pane(tmp_path: Path, make_app, isolated_settings: Path):
+    import json
+
+    files = make_session(tmp_path)
+    app = _measured(make_app, tmp_path)
+    app.nb.select(1)
+    app.pane_var.set("field")
+    good = files["good"][0].name
+    app.tree.selection_set(good)
+    _pump(app.root, lambda: good in app._field_cache)
+    assert not isinstance(app._field_cache[good], str)
+    text = app.field_text.get("1.0", "end")
+    assert "傾斜" in text and "場曲" in text and "星點拉長" in text
+    assert len(app.field_fig.axes) == 1
+
+    # 平均：分數最高的幾張保留片
+    app.field_mode_var.set("average")
+    _pump(app.root, lambda: any(k.startswith("avg:") for k in app._field_cache))
+    assert "5 張平均" in app.field_text.get("1.0", "end")
+    assert json.loads((isolated_settings / "settings.json").read_text(encoding="utf-8"))["field_mode"] == "average"

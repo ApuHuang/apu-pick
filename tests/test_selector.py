@@ -784,3 +784,24 @@ def test_cr3_camera_from_cmt1(tmp_path: Path):
         pass
 
     assert _metadata(OldRawpy(), cr3) == (300.0, 800.0, datetime(2026, 1, 2, 21, 30))
+
+
+def test_field_analysis_finds_tilt(tmp_path: Path):
+    """右半邊星點比較大（像感光元件傾斜）：傾斜要明顯、最大在右邊；整張一樣時接近 0。"""
+    import numpy as np
+
+    from astro_light_selector.field import analyze_frame, combine
+
+    shape = (600, 900)
+    left = make_star_field(shape=shape, n_stars=900, fwhm=3.0, seed=1)
+    right = make_star_field(shape=shape, n_stars=900, fwhm=4.5, seed=2)
+    tilted = np.where(np.arange(shape[1])[None, :] < shape[1] * 2 // 3, left, right).astype(np.uint16)
+    result = analyze_frame(write_fits(tmp_path / "tilted.fits", tilted))
+    assert result.tilt is not None and result.tilt > 20
+    assert result.worst_corner in ("tr", "br")
+    assert result.cells[1][2].fwhm > result.cells[1][0].fwhm * 1.3
+
+    flat = analyze_frame(write_fits(tmp_path / "flat.fits", left))
+    assert flat.tilt < 10 and abs(flat.curvature) < 10 and flat.corner_pattern() is None
+    both = combine([result, flat])
+    assert both.n_frames == 2 and both.cells[0][0] is not None

@@ -136,6 +136,12 @@ def _star_shape(cutout: np.ndarray, sigma0: float) -> tuple[float, float] | None
 
     FWHM 取長短軸 sigma 的幾何平均換算；離心率 0 = 正圓。
     """
+    fit = star_fit(cutout, sigma0)
+    return None if fit is None else fit[:2]
+
+
+def star_fit(cutout: np.ndarray, sigma0: float) -> tuple[float, float, float] | None:
+    """同 _star_shape，多回傳長軸的方向（弧度，影像座標 x 往右、y 往下；0 = 水平），像場分析用。"""
     h = CUTOUT_HALF
     p0 = [float(cutout.max()), h, h, sigma0, sigma0, 0.0, 0.0]
     lb = [0.0, h - 3, h - 3, MIN_SIGMA / 2, MIN_SIGMA / 2, -np.pi, -np.inf]
@@ -146,13 +152,14 @@ def _star_shape(cutout: np.ndarray, sigma0: float) -> tuple[float, float] | None
         return None
     if not res.success:
         return None
-    _, _, _, sx, sy, _, _ = res.x
+    _, _, _, sx, sy, theta, _ = res.x
     big, small = max(sx, sy), min(sx, sy)
     if small < MIN_SIGMA:
         return None
     fwhm = SIGMA_TO_FWHM * float(np.sqrt(sx * sy))
     ecc = float(np.sqrt(1 - (small / big) ** 2))
-    return fwhm, ecc
+    angle = float(theta) if sx >= sy else float(theta) + np.pi / 2  # sx 沿著旋轉後的 x 軸
+    return fwhm, ecc, angle
 
 
 def _number(header: fits.Header, *keys: str) -> float | None:
