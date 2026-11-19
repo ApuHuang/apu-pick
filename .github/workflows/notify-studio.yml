@@ -1,0 +1,28 @@
+# 打了版本標籤（v0.9.1 這種）→ 通知 APU Astro Studio（整合版）：它會開 PR 把內含的 APU Pick 換成這一版並跑測試。
+# 需要 repo secret STUDIO_DISPATCH_TOKEN：fine-grained PAT，只開 ApuHuang/apu-astro-studio 的 Contents 讀寫。
+# PAT 會過期，過期後這一步會失敗（標籤、Release 本身不受影響）：到 GitHub 設定重新產生、更新三個 repo 的 secret。
+
+name: Notify APU Astro Studio
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 送 repository_dispatch 給 apu-astro-studio
+        env:
+          TOKEN: ${{ secrets.STUDIO_DISPATCH_TOKEN }}
+          COMPONENT: apu-pick
+        run: |
+          if [ -z "$TOKEN" ]; then echo "沒有設定 STUDIO_DISPATCH_TOKEN，略過"; exit 0; fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          BODY=$(printf '{"event_type":"component-released","client_payload":{"component":"%s","version":"%s"}}' "$COMPONENT" "$VERSION")
+          curl -fsS -X POST https://api.github.com/repos/ApuHuang/apu-astro-studio/dispatches \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -d "$BODY"
+          echo "已通知：$COMPONENT $VERSION"
